@@ -162,11 +162,23 @@ REGISTER_OBSERVATION(base_height_command)
     // the robot still walks at the user's commanded height (e.g. 0.62) but never
     // deep-folds while walking. The deep-squat target is remembered, resumes on stop.
     float cmd_target = target;
-    const float WALK_MIN = 0.60f;  // matches BaseHeightCommandCfg.walk_min_height
+    const float WALK_MIN = base_height_cfg["walk_min"]
+                               ? base_height_cfg["walk_min"].as<float>() : 0.60f;
     const float DEAD = 0.05f;
-    if (std::fabs(joystick->ly()) > DEAD ||
-        std::fabs(joystick->lx()) > DEAD ||
-        std::fabs(joystick->rx()) > DEAD) {
+    // Settle window (`settle` under commands.base_height in deploy.yaml,
+    // seconds; must equal the gait_phase `settle` and training's SETTLE_TIME).
+    // The walking height is held for that long after the sticks are released,
+    // so the robot squares its feet before it is asked to squat. Absent or 0
+    // keeps the old behaviour: the squat target resumes the moment it stops.
+    const float settle = base_height_cfg["settle"]
+                             ? base_height_cfg["settle"].as<float>() : 0.0f;
+    static float idle_time = 1e9f;  // starts settled
+    const bool stick = std::fabs(joystick->ly()) > DEAD ||
+                       std::fabs(joystick->lx()) > DEAD ||
+                       std::fabs(joystick->rx()) > DEAD;
+    if (stick) idle_time = 0.0f;
+    else idle_time += env->step_dt;
+    if (stick || idle_time < settle) {
         cmd_target = std::max(target, WALK_MIN);
     }
 
@@ -276,7 +288,18 @@ REGISTER_OBSERVATION(gait_phase)
     obs[0] = std::sin(env->global_phase * 2 * M_PI);
     obs[1] = std::cos(env->global_phase * 2 * M_PI);
 
-    if (cmd_norm < 0.1f)
+    // Settle window (LiftFirst policies; `settle` in deploy.yaml, seconds).
+    // After the command drops to zero the clock stays visible for `settle`
+    // seconds, during which the policy squares its feet, and only then reads
+    // zero. Must equal GaitStateCfg.settle_time in training
+    // (src/tasks/liftfirst/mdp.py). Absent or 0 keeps the old behaviour: the
+    // clock reads zero the moment the command does.
+    const float settle = params["settle"] ? params["settle"].as<float>() : 0.0f;
+    static float idle_time = 1e9f;  // starts settled, like a training episode
+    if (cmd_norm < 0.1f) idle_time += env->step_dt;
+    else idle_time = 0.0f;
+
+    if (cmd_norm < 0.1f && idle_time >= settle)
     {
         obs[0] = 0.0f;
         obs[1] = 0.0f;

@@ -1,0 +1,8 @@
+{
+  "checkpoint": "2026-11-14_11-35-49_trial2k/model_1999.pt",
+  "iteration": 1999,
+  "checkpoint_sha256": "0cc85db697d5505390acd76b03c7057fe38b4865b430ef0062a1638b81435d06",
+  "policy_sha256": "c380ace890d046bbd1f61f229781134e6168266cd80b33e33362dff859dd9bda",
+  "onnx_vs_checkpoint_inputs": 100,
+  "onnx_vs_checkpoint_max_abs_error": 7.867813110351562e-06
+}

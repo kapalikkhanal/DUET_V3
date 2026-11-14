@@ -24,7 +24,7 @@ Motor properties (armature, effort limits) remain physical and come from
 uniform 0.25 (see G1_23DOF_DEPLOY_ACTION_SCALE).
 """
 
-from mjlab.actuator import BuiltinPositionActuatorCfg
+from mjlab.actuator import BuiltinPositionActuatorCfg, DelayedActuatorCfg
 from mjlab.entity import EntityArticulationInfoCfg, EntityCfg
 
 from src.assets.robots.unitree_g1.g1_23dof_constants import (
@@ -55,16 +55,61 @@ G1_23DOF_DEPLOY_PD_GAINS: dict[str, tuple[float, float]] = {
   ".*_wrist_roll_joint": (40.0, 10.0),
 }
 
+# Gain table of the PoultrySurface task (2026-11-14): the leg and waist gains of
+# NVIDIA's GR00T decoupled whole-body controller for the G1
+# (decoupled_wbc/sim2mujoco/resources/robots/g1/g1_gear_wbc.yaml), which sits in
+# the middle of what HOMIE, AMO, FALCON and AGILE use. Arms: the 91.5k policy
+# ran them at the soft 14.3 / 0.9 (measured on the robot as kp 14, kd 0.77), an
+# underdamped 1.3 Hz pendulum with a 0.6 kg hand; 40 / 3 is damping ratio ~0.4.
+G1_23DOF_POULTRY_PD_GAINS: dict[str, tuple[float, float]] = {
+  ".*_hip_pitch_joint": (150.0, 2.0),
+  ".*_hip_roll_joint": (150.0, 2.0),
+  ".*_hip_yaw_joint": (150.0, 2.0),
+  ".*_knee_joint": (200.0, 4.0),
+  ".*_ankle_pitch_joint": (40.0, 2.0),
+  ".*_ankle_roll_joint": (40.0, 2.0),
+  "waist_yaw_joint": (250.0, 5.0),
+  ".*_shoulder_pitch_joint": (40.0, 3.0),
+  ".*_shoulder_roll_joint": (40.0, 3.0),
+  ".*_shoulder_yaw_joint": (40.0, 3.0),
+  ".*_elbow_joint": (40.0, 3.0),
+  ".*_wrist_roll_joint": (40.0, 3.0),
+}
+
 # unitree_rl_gym deployment convention: uniform action scale.
 G1_23DOF_DEPLOY_ACTION_SCALE = 0.25
+
+# Actuator groups, in this order. ``dr.pd_gains`` and the delay events address
+# them by index: 0-4 are the policy's joints, 5 the externally driven arms.
+_ACTUATOR_GROUPS: tuple[tuple[tuple[str, ...], float, float], ...] = (
+  ((".*_hip_pitch_joint", ".*_hip_yaw_joint"), ARMATURE_7520_14, ACTUATOR_7520_14.effort_limit),
+  ((".*_hip_roll_joint",), ARMATURE_7520_22, ACTUATOR_7520_22.effort_limit),
+  ((".*_knee_joint",), ARMATURE_7520_22, ACTUATOR_7520_22.effort_limit),
+  ((".*_ankle_pitch_joint", ".*_ankle_roll_joint"), ARMATURE_5020 * 2, ACTUATOR_5020.effort_limit * 2),
+  (("waist_yaw_joint",), ARMATURE_7520_14, ACTUATOR_7520_14.effort_limit),
+  (
+    (
+      ".*_shoulder_pitch_joint",
+      ".*_shoulder_roll_joint",
+      ".*_shoulder_yaw_joint",
+      ".*_elbow_joint",
+      ".*_wrist_roll_joint",
+    ),
+    ARMATURE_5020,
+    ACTUATOR_5020.effort_limit,
+  ),
+)
+LEG_ACTUATOR_GROUPS = [0, 1, 2, 3, 4]
+ARM_ACTUATOR_GROUPS = [5]
 
 
 def _actuator(
   patterns: tuple[str, ...],
   armature: float,
   effort_limit: float,
+  table: dict[str, tuple[float, float]],
 ) -> BuiltinPositionActuatorCfg:
-  gains = {G1_23DOF_DEPLOY_PD_GAINS[p] for p in patterns}
+  gains = {table[p] for p in patterns}
   if len(gains) != 1:
     raise ValueError(f"Actuator group {patterns} mixes different PD gains: {gains}.")
   kp, kd = gains.pop()
@@ -77,54 +122,40 @@ def _actuator(
   )
 
 
-G1_23DOF_DEPLOY_ARTICULATION = EntityArticulationInfoCfg(
-  actuators=(
-    _actuator(
-      (".*_hip_pitch_joint", ".*_hip_yaw_joint"),
-      armature=ARMATURE_7520_14,
-      effort_limit=ACTUATOR_7520_14.effort_limit,
-    ),
-    _actuator(
-      (".*_hip_roll_joint",),
-      armature=ARMATURE_7520_22,
-      effort_limit=ACTUATOR_7520_22.effort_limit,
-    ),
-    _actuator(
-      (".*_knee_joint",),
-      armature=ARMATURE_7520_22,
-      effort_limit=ACTUATOR_7520_22.effort_limit,
-    ),
-    _actuator(
-      (".*_ankle_pitch_joint", ".*_ankle_roll_joint"),
-      armature=ARMATURE_5020 * 2,
-      effort_limit=ACTUATOR_5020.effort_limit * 2,
-    ),
-    _actuator(
-      ("waist_yaw_joint",),
-      armature=ARMATURE_7520_14,
-      effort_limit=ACTUATOR_7520_14.effort_limit,
-    ),
-    _actuator(
-      (
-        ".*_shoulder_pitch_joint",
-        ".*_shoulder_roll_joint",
-        ".*_shoulder_yaw_joint",
-        ".*_elbow_joint",
-        ".*_wrist_roll_joint",
-      ),
-      armature=ARMATURE_5020,
-      effort_limit=ACTUATOR_5020.effort_limit,
-    ),
-  ),
-  soft_joint_pos_limit_factor=0.9,
-)
+def _articulation(
+  table: dict[str, tuple[float, float]], delay_max_lag: int = 0
+) -> EntityArticulationInfoCfg:
+  actuators = [_actuator(p, arm, eff, table) for p, arm, eff in _ACTUATOR_GROUPS]
+  if delay_max_lag > 0:
+    # hold_prob 1: the lag never re-draws on its own. A reset event
+    # (``dr.sync_actuator_delays``) sets one value for the whole robot.
+    actuators = [
+      DelayedActuatorCfg(
+        base_cfg=a, delay_min_lag=0, delay_max_lag=delay_max_lag, delay_hold_prob=1.0
+      )
+      for a in actuators
+    ]
+  return EntityArticulationInfoCfg(
+    actuators=tuple(actuators), soft_joint_pos_limit_factor=0.9
+  )
 
 
-def get_g1_23dof_deploy_robot_cfg() -> EntityCfg:
-  """G1-23dof with deployment-grade PD gains (fresh instance per call)."""
+G1_23DOF_DEPLOY_ARTICULATION = _articulation(G1_23DOF_DEPLOY_PD_GAINS)
+
+
+def get_g1_23dof_deploy_robot_cfg(
+  gains: dict[str, tuple[float, float]] | None = None, delay_max_lag: int = 0
+) -> EntityCfg:
+  """G1-23dof with deployment-grade PD gains (fresh instance per call).
+
+  Args:
+    gains: (kp, kd) per joint pattern; ``None`` keeps the unitree_rl_gym table.
+    delay_max_lag: when > 0, every motor command is delayed by 0..this many
+      physics steps (5 ms each), one value per robot per episode.
+  """
   return EntityCfg(
     init_state=HOME_KEYFRAME,
     collisions=(FULL_COLLISION,),
     spec_fn=get_spec,
-    articulation=G1_23DOF_DEPLOY_ARTICULATION,
+    articulation=_articulation(gains or G1_23DOF_DEPLOY_PD_GAINS, delay_max_lag),
   )

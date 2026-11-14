@@ -130,6 +130,7 @@ inline po::variables_map helper(int argc, char** argv)
         ("version,v", "show version")
         ("log", "record log file")
         ("network,n", po::value<std::string>()->default_value(""), "dds network interface")
+        ("policy-dir", po::value<std::string>(), "Velocity policy folder (contains params/ and exported/)")
         ;
 
     po::variables_map vm;
@@ -156,6 +157,10 @@ inline po::variables_map helper(int argc, char** argv)
     {
         std::filesystem::create_directories(proj_dir / "log");
         spdlog::create_logger(proj_dir.string() + "/log/log.txt");
+    }
+
+    if (vm.count("policy-dir")) {
+        config["FSM"]["Velocity"]["policy_dir"] = vm["policy-dir"].as<std::string>();
     }
 
     return vm;

@@ -117,6 +117,15 @@ def _group_perm_sign(env, group: str, jp: list[int], js: list[float]):
   flat_sign: list[float] = []
   off = 0
   for name, dim in zip(names, dims, strict=True):
+    # A term with an observation history is its last H frames laid end to end
+    # (oldest first), so the single-frame rule is repeated once per frame.
+    term_cfg = om.get_term_cfg(group, name)
+    frames = term_cfg.history_length if (
+      term_cfg.history_length > 0 and term_cfg.flatten_history_dim
+    ) else 1
+    if dim % frames:
+      raise ValueError(f"symmetry: term '{name}' dim {dim} is not {frames} frames")
+    dim //= frames
     if name in ("joint_pos", "joint_vel"):
       p, s = jp, js
     elif name == "actions":
@@ -135,9 +144,10 @@ def _group_perm_sign(env, group: str, jp: list[int], js: list[float]):
       raise KeyError(f"symmetry: no mirror rule for obs term '{name}'")
     if len(p) != dim:
       raise ValueError(f"symmetry: term '{name}' rule len {len(p)} != obs dim {dim}")
-    flat_perm += [off + pi for pi in p]
-    flat_sign += list(s)
-    off += dim
+    for _ in range(frames):
+      flat_perm += [off + pi for pi in p]
+      flat_sign += list(s)
+      off += dim
   dev = env.unwrapped.device
   return (
     torch.tensor(flat_perm, dtype=torch.long, device=dev),

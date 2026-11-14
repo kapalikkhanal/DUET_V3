@@ -77,3 +77,13 @@ register_mjlab_task(
   rl_cfg=poultry_surface_ppo_runner_cfg(),
   runner_cls=DuetOnPolicyRunner,
 )
+
+# The task as the 91.5k policy was trained (soft gains, 0.60 s gait, no
+# history): for playing and evaluating checkpoints from before 2026-11-14.
+register_mjlab_task(
+  task_id="Unitree-G1-23Dof-Duet-PoultrySurface-91k",
+  env_cfg=unitree_g1_23dof_duet_poultry_surface_env_cfg(legacy=True),
+  play_env_cfg=unitree_g1_23dof_duet_poultry_surface_env_cfg(play=True, legacy=True),
+  rl_cfg=poultry_surface_ppo_runner_cfg(legacy=True),
+  runner_cls=DuetOnPolicyRunner,
+)

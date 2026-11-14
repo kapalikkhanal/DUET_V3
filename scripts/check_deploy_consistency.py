@@ -244,7 +244,10 @@ def main() -> int:
     "observation term order",
     f"\n         deploy : {deploy_obs}\n         trained: {trained_obs}",
   )
-  deploy_widths = [len(v["scale"]) for v in dep["observations"].values()]
+  deploy_widths = [
+    len(v["scale"]) * v.get("history_length", 1)
+    for v in dep["observations"].values()
+  ]
   if "observation_dims" in meta:
     ok, detail = _close(meta["observation_dims"], deploy_widths, 0)
     r.check(ok, "observation term widths", detail)

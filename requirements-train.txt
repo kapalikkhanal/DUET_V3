@@ -1,0 +1,26 @@
+# Exact package set the PoultrySurface task is trained and tested with (2026-11-14).
+#
+#   python3.11 -m venv ~/venvs/liftfirst
+#   ~/venvs/liftfirst/bin/pip install -r requirements-train.txt
+#
+# Do NOT install plain "mjlab": unpinned, pip pulls numpy 2.5, warp 1.19 and
+# torch 2.15, which this code has not been run against. Newer mjlab exists
+# (1.6.0, on MuJoCo 3.11) but the task code in src/ does not load on it.
+#
+# torch 2.7.0 with CUDA 12.8 supports RTX 50-series / RTX PRO Blackwell cards.
+--extra-index-url https://download.pytorch.org/whl/cu128
+torch==2.7.0+cu128
+numpy==1.26.0
+mjlab==1.2.0
+mujoco==3.5.0
+mujoco-warp==3.5.0
+warp-lang==1.12.0
+rsl-rl-lib==5.0.1
+tensordict==0.11.0
+tensorboard==2.20.0
+onnx==1.20.1
+onnxscript==0.6.2
+onnxruntime==1.22.1
+tyro==1.0.12
+mediapy==1.2.6
+scipy==1.13.1

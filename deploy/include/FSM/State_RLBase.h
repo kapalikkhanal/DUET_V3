@@ -22,10 +22,11 @@ public:
         // set gain
         for (int i = 0; i < env->robot->data.joint_stiffness.size(); ++i)
         {
-            lowcmd->msg_.motor_cmd()[i].kp() = env->robot->data.joint_stiffness[i];
-            lowcmd->msg_.motor_cmd()[i].kd() = env->robot->data.joint_damping[i];
-            lowcmd->msg_.motor_cmd()[i].dq() = 0;
-            lowcmd->msg_.motor_cmd()[i].tau() = 0;
+            const int motor = static_cast<int>(env->robot->data.joint_ids_map[i]);
+            lowcmd->msg_.motor_cmd()[motor].kp() = env->robot->data.joint_stiffness[i];
+            lowcmd->msg_.motor_cmd()[motor].kd() = env->robot->data.joint_damping[i];
+            lowcmd->msg_.motor_cmd()[motor].dq() = 0;
+            lowcmd->msg_.motor_cmd()[motor].tau() = 0;
         }
 
         env->robot->update();
