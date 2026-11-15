@@ -406,8 +406,12 @@ def poultry_surface_ppo_runner_cfg(legacy=False):
     reward_floor=ROUGH_REWARD_FLOOR,
     max_iterations=100_001 if legacy else 50_001,
   )
-  # Only matters when a run is resumed; see rl_cfg.DuetPpoAlgorithmCfg.
-  cfg.algorithm.freeze_obs_normalizer_on_load = True
+  # Only matters when a run is resumed; see rl_cfg.DuetPpoAlgorithmCfg. The
+  # 91.5k fine-tunes froze the normalizers of a mature checkpoint. The
+  # from-scratch run is resumed while its schedules are still moving (squat
+  # depth until 10.5k), so its normalizers keep updating as they did before
+  # the stop.
+  cfg.algorithm.freeze_obs_normalizer_on_load = legacy
   # Healthy checkpoints never exceed |a| ~13 (60k-65.5k); from 66k rare states
   # produced |a| up to 1000, blowing up the physics and the value loss. 30
   # bounds that while leaving 15-30 visible to action_excess_l2 (the deploy
