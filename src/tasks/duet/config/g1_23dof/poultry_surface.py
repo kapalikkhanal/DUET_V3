@@ -340,9 +340,15 @@ def _train_from_scratch(cfg, play):
   # (7) Stand upright. The 2k trial stood 9.7 deg forward with its hips back
   # (the 91.5k policy: 5.9 deg on the robot). 9.7 deg costs 0.29/s here against
   # 0.07/s in body_orientation_l2. Not applied to squats.
+  # Free band 1.5 -> 0.5 deg at 5,500 iterations of the full run: the stance
+  # had moved from +0.4 deg (4,000) to 2.0 deg BACKWARD, which the wider band
+  # charged almost nothing for (0.017/s; now 0.052/s).
   cfg.rewards["stand_upright"] = RewardTermCfg(
     func=settle.stand_upright, weight=-2.0,
-    params={"asset_cfg": SceneEntityCfg("robot", body_names=("torso_link",))},
+    params={
+      "deadband": 0.009,
+      "asset_cfg": SceneEntityCfg("robot", body_names=("torso_link",)),
+    },
   )
   if not play:
     # More walk-to-stop transitions than command resampling alone gives.
