@@ -4,7 +4,7 @@ Trained FROM SCRATCH in one run since 2026-11-14. The 91.5k policy was reached
 through a chain of resumes (walking, then arms and height, then litter and
 foot lift); on the farm it worked but wobbled, took balance steps, marched and
 did not come back to a square stance. The task keeps that policy's rewards and
-changes eight things, all in ``_train_from_scratch`` at the bottom of this file:
+changes nine things, all in ``_train_from_scratch`` at the bottom of this file:
 
   1  gait period 0.60 s -> 0.85 s (a calm walk instead of a march)
   2  stiff leg gains (GR00T decoupled-WBC table) with a uniform 0.25 action scale
@@ -18,6 +18,9 @@ changes eight things, all in ``_train_from_scratch`` at the bottom of this file:
   8  a gait reward that pays nothing for standing still under a walk command
      (added at 4,000 iterations of the full run: pure sideways commands were
      answered by standing; turning and backward walking were already learned)
+  9  a wider foot-spacing band while a sideways velocity is commanded, and a
+     stronger upright term (added at 19,000: sideways walking was capped at
+     0.23 m/s by the spacing band, and the stance leaned 2.4-4.2 deg forward)
 
 ``legacy=True`` builds the task exactly as the 91.5k policy was trained. The
 egg-tray task (frozen 91.5k legs) and any evaluation of the old checkpoints use
@@ -305,6 +308,18 @@ def _train_from_scratch(cfg, play):
   cfg.observations["actor"].history_length = HISTORY
   cfg.observations["actor"].flatten_history_dim = True
 
+  # (9) Foot spacing: the 0.20-0.35 m band stays for standing, forward walking
+  # and turning; a sideways command gets 0.14-0.48 m, because the narrow band
+  # capped sidestepping at 0.23 m/s (see settle.feet_spacing).
+  cfg.rewards["feet_distance"] = RewardTermCfg(
+    func=settle.feet_spacing, weight=cfg.rewards["feet_distance"].weight,
+    params={
+      "min_distance": cfg.rewards["feet_distance"].params["min_distance"],
+      "max_distance": cfg.rewards["feet_distance"].params["max_distance"],
+      "asset_cfg": feet(),
+    },
+  )
+
   # (5) Stop -> settle -> stand. ``twist_held`` is the velocity command with its
   # fall to zero delayed by SETTLE_TIME; every term that means "you are standing
   # now" reads it instead of the raw command. See mdp/settle.py.
@@ -343,8 +358,12 @@ def _train_from_scratch(cfg, play):
   # Free band 1.5 -> 0.5 deg at 5,500 iterations of the full run: the stance
   # had moved from +0.4 deg (4,000) to 2.0 deg BACKWARD, which the wider band
   # charged almost nothing for (0.017/s; now 0.052/s).
+  # Weight -2.0 -> -5.0 at 19,000: with pushes, payloads and arm motion at
+  # full strength the stance wandered between +2.4 and +4.2 deg forward
+  # (16,000-19,000) although this was already its largest standing penalty
+  # (0.13/s at 4.2 deg; now 0.32/s).
   cfg.rewards["stand_upright"] = RewardTermCfg(
-    func=settle.stand_upright, weight=-2.0,
+    func=settle.stand_upright, weight=-5.0,
     params={
       "deadband": 0.009,
       "asset_cfg": SceneEntityCfg("robot", body_names=("torso_link",)),

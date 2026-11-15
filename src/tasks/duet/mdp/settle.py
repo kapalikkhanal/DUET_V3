@@ -179,6 +179,35 @@ def gait_swing(
   return (good - bad) * _held(env).moving
 
 
+def feet_spacing(
+  env: ManagerBasedRlEnv,
+  min_distance: float = 0.20,
+  max_distance: float = 0.35,
+  side_min_distance: float = 0.14,
+  side_max_distance: float = 0.48,
+  side_threshold: float = 0.1,
+  asset_cfg: SceneEntityCfg = _ROBOT,
+) -> torch.Tensor:
+  """Lateral foot spacing outside its allowed band (m); wider band for sidesteps.
+
+  The shared ``feet_lateral_distance`` keeps the feet 0.20-0.35 m apart at all
+  times. A sidestep can only travel as far as the spacing opens and closes, so
+  with the 0.85 s stride that band caps sideways walking near 0.18 m/s: at
+  19,000 iterations of the full run a 0.40 m/s sideways command gave 0.23 m/s
+  with the spacing swinging 0.16-0.36 m, unchanged since iteration 6,500.
+  While a sideways velocity is commanded (and through the settle window after
+  it) the band is ``side_min_distance``-``side_max_distance``, enough for about
+  0.35 m/s. Standing, forward walking and turning keep the narrow band.
+  """
+  asset: Entity = env.scene[asset_cfg.name]
+  feet = asset.data.site_pos_w[:, asset_cfg.site_ids, :]
+  lateral = quat_apply_inverse(asset.data.root_link_quat_w, feet[:, 0] - feet[:, 1])[:, 1].abs()
+  side = _held(env).command[:, 1].abs() > side_threshold
+  lo = torch.where(side, side_min_distance, min_distance)
+  hi = torch.where(side, side_max_distance, max_distance)
+  return (lo - lateral).clamp_min(0.0) + (lateral - hi).clamp_min(0.0)
+
+
 def stand_upright(
   env: ManagerBasedRlEnv,
   deadband: float = 0.026,
