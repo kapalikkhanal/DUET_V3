@@ -71,8 +71,12 @@ SQUAT_FLOOR = 0.22  # m; was HEIGHT_RANGE[0] = 0.24
 
 # (1) Stride period. The 91.5k policy was trained at 0.60 s and measured
 # 1.63 Hz on the robot: 3.3 foot strikes a second with a 0.24 s swing. At 0.85 s
-# the swing is 0.37 s. deploy.yaml's gait_phase ``period`` must match.
-GAIT_PERIOD = 0.85
+# the swing was 0.37 s. deploy.yaml's gait_phase ``period`` must match.
+# 0.85 -> 0.75 at iteration 19,500 of the full run (user, 2026-11-15): the slow
+# stride walked forward with a visible side-to-side sway. Checkpoints up to
+# 19,500 were trained at 0.85; pass that to ``set_gait_period`` (or
+# ``--gait-period`` of the scripts) when testing them.
+GAIT_PERIOD = 0.75
 # (3) Actor observation history, frames at 50 Hz. HOMIE and GR00T use 6.
 HISTORY = 6
 # (4) Motor command delay, physics steps of 5 ms: 0-20 ms, one value per episode.
@@ -248,6 +252,16 @@ def unitree_g1_23dof_duet_poultry_surface_env_cfg(
     cfg.metrics[key] = MetricsTermCfg(func=poultry_metric, params={"name": name})
   if not legacy:
     _train_from_scratch(cfg, play)
+  return cfg
+
+
+def set_gait_period(cfg, period):
+  """Set the stride period everywhere it is used: clock input, gait reward, swing schedule."""
+  cfg.rewards["foot_gait"].params["period"] = period
+  cfg.actions["poultry_surface"].period = period
+  for group in ("actor", "critic"):
+    terms = cfg.observations[group].terms
+    terms["phase"] = replace(terms["phase"], params={**terms["phase"].params, "period": period})
   return cfg
 
 

@@ -78,6 +78,6 @@ FSM:
       # and then holds a fixed stance under PD -- the right state to be lifted in.
       # Press 1 BEFORE lifting; press 2 to hand back to the policy afterwards.
       FixStand: "(LT + up.on_pressed) | F1.on_pressed"
-    policy_dir: config/policy/poultry/patched_19499
+    policy_dir: config/policy/poultry/full_26500
 
 

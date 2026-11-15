@@ -1,6 +1,9 @@
 """Measure what a PoultrySurface checkpoint actually does, on a flat floor.
 
-  PYTHONPATH=. python scripts/poultry/probe.py logs/rsl_rl/DUET_G1_23dof_poultry/<run>/model_5000.pt
+  PYTHONPATH=. python scripts/poultry/probe.py logs/rsl_rl/DUET_G1_23dof_poultry/<run>/model_5000.pt [GAIT_PERIOD]
+
+GAIT_PERIOD: the stride period the checkpoint was trained with (default: the
+task's current value; checkpoints up to 19,500 of the full run used 0.85).
 
 128 robots, no pushes, arms still, 0.6 kg per hand. Safe to run while a
 training is going on the same GPU (takes about two minutes). Prints:
@@ -27,6 +30,9 @@ from mjlab.utils.lab_api.math import quat_apply, quat_apply_inverse, matrix_from
 TASK = "Unitree-G1-23Dof-Duet-PoultrySurface"; DEV = "cuda:0"; N = 128
 ckpt = sys.argv[1]
 cfg = load_env_cfg(TASK, play=True); cfg.scene.num_envs = N
+if len(sys.argv) > 2 and sys.argv[2].replace(".", "").isdigit():
+  from src.tasks.duet.config.g1_23dof.poultry_surface import set_gait_period
+  set_gait_period(cfg, float(sys.argv[2]))
 cfg.scene.terrain.terrain_type = "plane"; cfg.scene.terrain.terrain_generator = None
 cfg.events["reset_base"].func = envs_mdp.reset_root_state_uniform
 cfg.events["reset_base"].params = {"pose_range": {"yaw": (-3.14, 3.14)}, "velocity_range": {}}

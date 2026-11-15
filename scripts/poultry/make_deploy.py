@@ -1,10 +1,12 @@
 """Turn a PoultrySurface checkpoint into a deploy folder for the C++ controller.
 
-  PYTHONPATH=. python scripts/poultry/make_deploy.py RUN_DIR CHECKPOINT NAME
+  PYTHONPATH=. python scripts/poultry/make_deploy.py RUN_DIR CHECKPOINT NAME [GAIT_PERIOD]
 
   RUN_DIR     e.g. logs/rsl_rl/DUET_G1_23dof_poultry/2026-11-14_11-35-49_trial2k
   CHECKPOINT  e.g. model_1999.pt
   NAME        folder created under deploy/robots/g1_23dof/config/policy/poultry/
+  GAIT_PERIOD stride period the checkpoint was trained with, s (default: the
+              task's current value; checkpoints up to 19,500 used 0.85)
 
 Writes exported/policy.onnx (with the training contract in its metadata),
 exported/checkpoint.json and params/deploy.yaml. Gains, action scale, default
@@ -58,7 +60,8 @@ OBS = {
   "base_ang_vel": ("base_ang_vel", {}),
   "projected_gravity": ("projected_gravity", {}),
   "command": ("velocity_commands", {"params": {"command_name": "base_velocity"}}),
-  "phase": ("gait_phase", {"params": {"period": P.GAIT_PERIOD, "settle": P.SETTLE_TIME}}),
+  "phase": ("gait_phase", {"params": {"period": float(sys.argv[4]) if len(sys.argv) > 4 else P.GAIT_PERIOD,
+                                      "settle": P.SETTLE_TIME}}),
   "joint_pos": ("joint_pos_rel", {}),
   "joint_vel": ("joint_vel_rel", {}),
   "actions": ("last_action", {"clip": [-15.0, 15.0]}),
@@ -168,7 +171,8 @@ def main() -> int:
   }
   header = (
     f"# PoultrySurface {run_dir.name}/{ckpt_name} (iteration {iteration}).\n"
-    f"# {P.HISTORY} frames per observation term: {meta['obs_dim']} inputs, {n_act} actions.\n"
+    f"# {P.HISTORY} frames per observation term: {meta['obs_dim']} inputs, {n_act} actions. "
+    f"Gait period {OBS['phase'][1]['params']['period']} s.\n"
     f"# Command ranges are what the curriculum had reached at this checkpoint.\n"
     f"# Written by scripts/poultry/make_deploy.py; contract hash {meta['deploy_config_hash']}.\n"
   )

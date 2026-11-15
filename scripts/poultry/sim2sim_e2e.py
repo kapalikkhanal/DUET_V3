@@ -30,7 +30,12 @@ Sequence (seconds after start):
       falling robot.
   18  forward 0.4 m/s for 6 s, then stop
   30  sideways 0.3 m/s for 6 s, then stop
-  42  turn 0.6 rad/s for 6 s, then stop; ends at 52
+  42  turn 0.6 rad/s for 6 s, then stop
+  54  backward 0.3 m/s for 6 s, then stop; ends at 64
+
+After the run a gait table is printed for each walking phase: speed, step rate,
+how regular the steps are, left/right swing time, side-to-side sway, roll and
+heading wobble.
 
 --keep-band never releases the band (the robot hangs from it).
 Uses DDS domain 0 on lo: do not run while another simulator or controller is up.
@@ -133,8 +138,9 @@ PHASES = [  # (start s, label, keys, lx, ly, rx)
   (18, "forward 0.4", 0, 0, 0.4, 0), (24, "stop", 0, 0, 0, 0),
   (30, "sideways 0.3", 0, 0.3, 0, 0), (36, "stop", 0, 0, 0, 0),
   (42, "turn 0.6", 0, 0, 0, 0.6), (48, "stop", 0, 0, 0, 0),
+  (54, "backward 0.3", 0, 0, -0.3, 0), (60, "stop", 0, 0, 0, 0),
 ]
-END = 52.0
+END = 64.0
 t0 = time.monotonic()
 
 
@@ -184,7 +190,7 @@ def _on_cmd(msg):
 _cmd_sub = ChannelSubscriber("rt/lowcmd", LowCmd_)
 _cmd_sub.Init(_on_cmd, 10)
 NU = m.nu
-SPD, XY = [], []
+SPD, XY, GAIT = [], [], []
 
 
 def pitch_roll():
@@ -214,6 +220,9 @@ while ((t := time.monotonic() - t0) < END or a.manual) and (viewer is None or vi
       d.ctrl[:NU] = cmd[0] + cmd[1] * (cmd[2] - d.sensordata[:NU]) + cmd[3] * (cmd[4] - d.sensordata[NU:2 * NU])
     mujoco.mj_step(m, d)
     sim_t += m.opt.timestep
+  if not a.manual:  # kept cheap: anything slow here makes the simulator fall behind real time
+    GAIT.append((t, d.qpos[0], d.qpos[1], d.qpos[3], d.qpos[4], d.qpos[5], d.qpos[6],
+                 d.xpos[foot_ids[0], 2], d.xpos[foot_ids[1], 2], sim_t))
   if 11.0 <= t < 17.0 and not a.manual:
     SPD.append((d.sensordata[NU + 5], d.sensordata[NU + 12]))
     XY.append((d.qpos[0], d.qpos[1]))
@@ -243,6 +252,42 @@ if SPD:
   v = np.array(SPD)
   print(f"standing 11-17 s: ankle-roll speed {np.sqrt((v[:, 0] ** 2).mean()):.2f} rad/s rms, waist {np.sqrt((v[:, 1] ** 2).mean()):.2f} rad/s rms "
         f"(a quiet stance is below 0.1); pelvis travelled {100 * np.linalg.norm(np.array(XY[-1]) - np.array(XY[0])):.0f} cm")
+if GAIT:
+  G0 = np.array(GAIT, dtype=float)
+  qw, qx, qy, qz = G0[:, 3], G0[:, 4], G0[:, 5], G0[:, 6]
+  gx, gy, gz = -2 * (qx * qz - qw * qy), -2 * (qy * qz + qw * qx), -(1 - 2 * (qx * qx + qy * qy))
+  floor_z = np.percentile(G0[:, 7:9], 5, axis=0)  # ankle height with the foot flat on the floor
+  G = np.column_stack([G0[:, 0], G0[:, 1], G0[:, 2], 2 * np.arctan2(qz, qw), np.degrees(np.arctan2(-gy, -gz)),
+                       np.degrees(np.arctan2(gx, -gz)), G0[:, 7] < floor_z[0] + 0.012, G0[:, 8] < floor_z[1] + 0.012, G0[:, 9]])
+  print("\ngait, measured from 1.5 s after each walking command until it ends:")
+  print(f"{'phase':>13} | speed m/s | steps/s | step-time jitter | swing L / R s | sway cm | roll deg | pitch deg | heading wobble deg | heading drift deg/s")
+  for (ts, label, _, lx, ly, rx), nxt in zip(PHASES, PHASES[1:] + [(END,)]):
+    if not (lx or ly or rx):
+      continue
+    g = G[(G[:, 0] >= ts + 1.5) & (G[:, 0] < nxt[0])]
+    if len(g) < 100:
+      continue
+    tt = g[:, 8] - g[0, 8]  # simulated time
+    det = lambda x: x - np.polyval(np.polyfit(tt, x, 1), tt)  # noqa: E731
+    yaw = np.unwrap(g[:, 3])
+    head = yaw.mean()
+    lat = -(g[:, 1] - g[0, 1]) * np.sin(head) + (g[:, 2] - g[0, 2]) * np.cos(head)
+    dist = np.hypot(g[-1, 1] - g[0, 1], g[-1, 2] - g[0, 2])
+    swing, tds = [[], []], []
+    for f in (0, 1):
+      on = g[:, 6 + f] > 0.5
+      lo, td = np.where(~on[1:] & on[:-1])[0], np.where(on[1:] & ~on[:-1])[0]
+      tds += list(tt[td])
+      for i0 in lo:
+        nx = td[td > i0]
+        if len(nx):
+          swing[f].append(tt[nx[0]] - tt[i0])
+    per = np.diff(np.sort(tds))
+    per = per[per > 0.08]  # ignore contact chatter at touchdown
+    amp = lambda x: 2 * np.sqrt(2) * x.std()  # noqa: E731  (peak to peak of a sine with this spread)
+    print(f"{label:>13} | {dist / tt[-1]:9.2f} | {1 / per.mean():7.2f} | {100 * per.std() / per.mean():15.0f}% | "
+          f"{np.mean(swing[0]):.2f} / {np.mean(swing[1]):.2f}   | {100 * amp(det(lat)):7.1f} | {amp(g[:, 4]):8.1f} | {amp(g[:, 5]):9.1f} | "
+          f"{amp(det(np.degrees(yaw))):18.1f} | {np.degrees(yaw[-1] - yaw[0]) / tt[-1]:+.1f}")
 print(f"real-time factor {sim_t / (time.monotonic() - t0):.2f}")
 if ctrl:
   ctrl.terminate()
