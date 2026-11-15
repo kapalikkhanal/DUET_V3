@@ -1,0 +1,8 @@
+{
+  "checkpoint": "2026-11-15_07-21-33_patch19k/model_19499.pt",
+  "iteration": 19499,
+  "checkpoint_sha256": "874b2284bbbd195fb013f17dff152464ab102ead5d2f39b21a182428be9b57af",
+  "policy_sha256": "8d00d67190fa3b9a43cacc9d2791bbff3b64d4a6cf93e5d6d1d5ff36a682725a",
+  "onnx_vs_checkpoint_inputs": 100,
+  "onnx_vs_checkpoint_max_abs_error": 9.5367431640625e-06
+}

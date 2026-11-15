@@ -1,12 +1,25 @@
-"""End-to-end test of the deployed controller: g1_ctrl + unitree_mujoco, no viewer.
+"""Simulator for testing the deployed controller (g1_ctrl) on the unitree_mujoco model.
 
-Runs the unitree_mujoco Python simulator headless (same model, same SDK bridge,
-same 5 ms step as simulate_python/unitree_mujoco.py), plays a fixed sequence of
-remote presses on rt/wirelesscontroller (what keyboard.py sends), and prints
-what the robot did. Start g1_ctrl yourself in another terminal, or pass
---ctrl to have this script start and stop it.
+Same robot model and SDK bridge as ~/unitree_mujoco/simulate_python, with one
+difference that matters: the motor PD torque is computed from the current joint
+state at every physics step, and the physics runs at 2.5 ms. The stock Python
+simulator computes it in another thread from states up to 5 ms old; with stiff,
+lightly damped gains (ankle 40/2, waist 250/5) that makes the ankles and waist
+ring at ~30 Hz, and a policy that is fine looks as if it cannot stand. A real
+motor runs its PD loop far faster than either. --stock-bridge --substeps 1
+reproduces the stock behaviour.
+
+Automatic test, no window (plays the sequence below and prints the motion):
 
   python scripts/poultry/sim2sim_e2e.py --ctrl deploy/robots/g1_23dof/build/g1_ctrl
+
+Watch and drive it yourself (window; run keyboard.py in another terminal):
+
+  python scripts/poultry/sim2sim_e2e.py --viewer --manual --ctrl deploy/robots/g1_23dof/build/g1_ctrl
+  keyboard.py: 1 = FixStand, wait 3 s, 2 = policy; then click the window and
+  press 9 to release the band (8 / 7 lower / raise it first if needed).
+
+--policy-dir picks the policy folder; without it g1_ctrl uses config.yaml.
 
 Sequence (seconds after start):
    3  F1 -> FixStand (legs ease to the default pose over 3 s)
@@ -47,6 +60,20 @@ ap = argparse.ArgumentParser()
 ap.add_argument("--ctrl", default=None, help="path to g1_ctrl; started with --network lo")
 ap.add_argument("--scene", default=str(SIM_DIR / config.ROBOT_SCENE))
 ap.add_argument("--keep-band", action="store_true")
+ap.add_argument("--viewer", action="store_true", help="open the MuJoCo window")
+ap.add_argument("--manual", action="store_true",
+                help="no scripted remote and no time limit: drive it with keyboard.py; the band is "
+                     "released with key 9 in the window. Needs --viewer.")
+ap.add_argument("--stock-bridge", action="store_true",
+                help="let the stock Python bridge compute the motor torque, as unitree_mujoco.py does: "
+                     "from another thread, using joint states that are up to one physics step old. "
+                     "With stiff, lightly damped gains (ankle 40/2, waist 250/5) that makes the ankles "
+                     "and waist ring at ~30 Hz. By default this script computes the PD torque itself, "
+                     "from the latest command and the current state, right before every physics step.")
+ap.add_argument("--sim-dt", type=float, default=config.SIMULATE_DT, help="simulator loop period, s")
+ap.add_argument("--substeps", type=int, default=2,
+                help="physics steps (each with a fresh PD torque) per loop period; 2 gives a 2.5 ms "
+                     "motor loop while states are still published every 5 ms")
 ap.add_argument("--keep-table", action="store_true",
                 help="leave scene_23dof.xml's table and box 0.6 m in front of the robot "
                      "(by default they are moved out of the way: walking forward runs into them)")
@@ -61,7 +88,7 @@ a = ap.parse_args()
 
 m = mujoco.MjModel.from_xml_path(a.scene)
 d = mujoco.MjData(m)
-m.opt.timestep = config.SIMULATE_DT
+m.opt.timestep = a.sim_dt
 if not a.keep_table:
   for name in ("table", "pick_box"):
     bid = mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_BODY, name)
@@ -73,7 +100,23 @@ if not a.keep_table:
       m.body_pos[bid, 0] += 30.0
   mujoco.mj_forward(m, d)
 ChannelFactoryInitialize(0, "lo")
-bridge = UnitreeSdk2Bridge(m, d)
+
+
+class _NoCtrl:
+  """The simulation data as the bridge sees it, except that its torque writes go nowhere."""
+
+  def __init__(self, data):
+    object.__setattr__(self, "_data", data)
+    object.__setattr__(self, "ctrl", np.zeros(m.nu))
+
+  def __getattr__(self, name):
+    return getattr(self._data, name)
+
+
+bridge = UnitreeSdk2Bridge(m, d)  # reads the publish period from the model: still sim_dt here
+if not a.stock_bridge:
+  bridge.mj_data = _NoCtrl(d)
+m.opt.timestep = a.sim_dt / a.substeps
 bridge.SetupDDSWireless()
 band = ElasticBand()
 if a.band_height > 0:
@@ -116,7 +159,32 @@ if a.ctrl:
     cmd += ["--policy-dir", str(Path(a.policy_dir).resolve())]
   ctrl = subprocess.Popen(cmd,
                           cwd=str(Path(a.ctrl).resolve().parent), stdout=ctrl_log, stderr=subprocess.STDOUT)
-threading.Thread(target=publish, daemon=True).start()
+if a.manual and not a.viewer:
+  sys.exit("--manual needs --viewer")
+if not a.manual:
+  threading.Thread(target=publish, daemon=True).start()
+viewer = None
+if a.viewer:
+  import mujoco.viewer
+  viewer = mujoco.viewer.launch_passive(m, d, key_callback=band.MujuocoKeyCallback)
+next_sync = 0.0
+
+from unitree_sdk2py.core.channel import ChannelSubscriber  # noqa: E402
+from unitree_sdk2py.idl.unitree_hg.msg.dds_ import LowCmd_  # noqa: E402
+
+latest = {"msg": None, "count": 0, "stamps": []}
+
+
+def _on_cmd(msg):
+  latest["msg"] = msg
+  latest["count"] += 1
+  latest["stamps"].append(time.monotonic())
+
+
+_cmd_sub = ChannelSubscriber("rt/lowcmd", LowCmd_)
+_cmd_sub.Init(_on_cmd, 10)
+NU = m.nu
+SPD, XY = [], []
 
 
 def pitch_roll():
@@ -128,30 +196,53 @@ def pitch_roll():
   return np.degrees(np.arctan2(g[0], -g[2])), np.degrees(np.arctan2(-g[1], -g[2]))
 
 
-print(f"scene {a.scene}\nstep {m.opt.timestep} s, band {'kept' if a.keep_band else f'released at {a.release_at:g} s'}, "
+print(f"scene {a.scene}\nmotor torque: {'stock bridge' if a.stock_bridge else 'computed every physics step'}; step {m.opt.timestep} s, band {'kept' if a.keep_band else f'released at {a.release_at:g} s'}, "
       f"band length {band.length:.2f} m, policy {a.policy_dir or 'from config.yaml'}")
 print(f"{'t':>5} {'phase':>13} {'band':>4} {'pelvis z':>8} {'x cm':>7} {'y cm':>7} {'yaw deg':>7} {'pitch':>6} {'roll':>6} {'feet on floor':>13}")
 next_log, sim_t, fell = 0.0, 0.0, False
 foot_ids = [m.body(n).id for n in ("left_ankle_roll_link", "right_ankle_roll_link")]
-while (t := time.monotonic() - t0) < END:
-  band.enable = a.keep_band or t < a.release_at
+while ((t := time.monotonic() - t0) < END or a.manual) and (viewer is None or viewer.is_running()):
+  if not a.manual:
+    band.enable = a.keep_band or t < a.release_at
   d.xfrc_applied[torso, :3] = band.Advance(d.qpos[:3], d.qvel[:3]) if band.enable else 0.0
-  mujoco.mj_step(m, d)
-  sim_t += m.opt.timestep
+  cmd = None
+  if not a.stock_bridge and latest["msg"] is not None:
+    mc = latest["msg"].motor_cmd
+    cmd = np.array([(mc[i].tau, mc[i].kp, mc[i].q, mc[i].kd, mc[i].dq) for i in range(NU)]).T
+  for _ in range(a.substeps):
+    if cmd is not None:
+      d.ctrl[:NU] = cmd[0] + cmd[1] * (cmd[2] - d.sensordata[:NU]) + cmd[3] * (cmd[4] - d.sensordata[NU:2 * NU])
+    mujoco.mj_step(m, d)
+    sim_t += m.opt.timestep
+  if 11.0 <= t < 17.0 and not a.manual:
+    SPD.append((d.sensordata[NU + 5], d.sensordata[NU + 12]))
+    XY.append((d.qpos[0], d.qpos[1]))
   if t >= next_log:
     p, r = pitch_roll()
     yaw = np.degrees(2 * np.arctan2(d.qpos[6], d.qpos[3]))
     floor = {m.geom_bodyid[c.geom1] for c in d.contact[:d.ncon]} | {m.geom_bodyid[c.geom2] for c in d.contact[:d.ncon]}
     feet = sum(f in floor for f in foot_ids)
-    print(f"{t:5.1f} {phase(t)[1]:>13} {'on' if band.enable else 'off':>4} {d.qpos[2]:8.3f} {100 * d.qpos[0]:+7.1f} {100 * d.qpos[1]:+7.1f} {yaw:+7.1f} {p:+6.1f} {r:+6.1f} {feet:>13}")
+    print(f"{t:5.1f} {'manual' if a.manual else phase(t)[1]:>13} {'on' if band.enable else 'off':>4} {d.qpos[2]:8.3f} {100 * d.qpos[0]:+7.1f} {100 * d.qpos[1]:+7.1f} {yaw:+7.1f} {p:+6.1f} {r:+6.1f} {feet:>13}")
     sys.stdout.flush()
     next_log += 1.0
     if d.qpos[2] < 0.35 and not fell:
       fell = True
       print("      ^ pelvis below 0.35 m: FELL")
+  if viewer is not None and t >= next_sync:
+    viewer.sync()
+    next_sync = t + 0.03
   lag = sim_t - (time.monotonic() - t0)
   if lag > 0:
     time.sleep(lag)
+if len(latest["stamps"]) > 10:
+  gaps = np.diff(np.array(latest["stamps"])) * 1000
+  print(f"command messages: {len(gaps) / (latest['stamps'][-1] - latest['stamps'][0]):.0f} per second; "
+        f"gap between messages median {np.median(gaps):.1f} ms, 99% {np.percentile(gaps, 99):.1f} ms, max {gaps.max():.0f} ms "
+        f"(motor torque from the {'stock bridge' if a.stock_bridge else 'current state at every physics step'})")
+if SPD:
+  v = np.array(SPD)
+  print(f"standing 11-17 s: ankle-roll speed {np.sqrt((v[:, 0] ** 2).mean()):.2f} rad/s rms, waist {np.sqrt((v[:, 1] ** 2).mean()):.2f} rad/s rms "
+        f"(a quiet stance is below 0.1); pelvis travelled {100 * np.linalg.norm(np.array(XY[-1]) - np.array(XY[0])):.0f} cm")
 print(f"real-time factor {sim_t / (time.monotonic() - t0):.2f}")
 if ctrl:
   ctrl.terminate()

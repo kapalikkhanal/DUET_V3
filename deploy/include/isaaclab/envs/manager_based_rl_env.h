@@ -63,6 +63,20 @@ public:
         auto obs = observation_manager->compute();
         auto action = alg->act(obs);
         action_manager->process_action(action);
+
+        // Debug: with DUET_OBS_DUMP=<file> set, append every policy step's
+        // observation and raw action (float32, obs then action) to that file.
+        static FILE* dump = nullptr;
+        static bool dump_checked = false;
+        if (!dump_checked) {
+            dump_checked = true;
+            if (const char* path = std::getenv("DUET_OBS_DUMP")) dump = std::fopen(path, "wb");
+        }
+        if (dump) {
+            for (auto & kv : obs) std::fwrite(kv.second.data(), sizeof(float), kv.second.size(), dump);
+            std::fwrite(action.data(), sizeof(float), action.size(), dump);
+            std::fflush(dump);
+        }
     }
 
     float step_dt;
