@@ -147,6 +147,38 @@ def stand_feet_square(
   return (_feet_stagger(env, asset_cfg) - deadband).clamp_min(0.0) * _held(env).standing
 
 
+def gait_swing(
+  env: ManagerBasedRlEnv,
+  sensor_name: str,
+  period: float,
+  stance_fraction: float = 0.56,
+  offset: tuple[float, float] = (0.0, 0.5),
+) -> torch.Tensor:
+  """Foot in the air during its scheduled swing; zero for a robot that stands.
+
+  +1 (averaged over the stride) for lifting each foot in its swing window, -1
+  per foot that is airborne while it is scheduled to be planted. Zero unless a
+  velocity is commanded.
+
+  Why not the shared ``feet_gait``: that term scores agreement between contact
+  and the schedule in BOTH phases, so a robot that never lifts a foot still
+  collects the stance share, 56% of it. At 4,000 iterations of the full run the
+  robot answered a pure sideways command of 0.25 or 0.40 m/s by standing still
+  (0.00 m/s, no steps), although it sidestepped at half speed when a forward
+  command had it stepping already. Stepping on the spot paid only the missing
+  44% and cost the foot-lift penalties, so there was no first move toward a
+  sidestep. Here standing under a walk command earns nothing.
+  """
+  sensor: ContactSensor = env.scene[sensor_name]
+  air = sensor.data.current_contact_time <= 0.0
+  phase = (env.episode_length_buf * env.step_dt / period).unsqueeze(1)
+  phase = (phase + torch.as_tensor(offset, device=env.device).view(1, -1)) % 1.0
+  swing = phase >= stance_fraction
+  good = (swing & air).float().mean(dim=1) / (1.0 - stance_fraction)
+  bad = (~swing & air).float().mean(dim=1)
+  return (good - bad) * _held(env).moving
+
+
 def stand_upright(
   env: ManagerBasedRlEnv,
   deadband: float = 0.026,

@@ -4,7 +4,7 @@ Trained FROM SCRATCH in one run since 2026-11-14. The 91.5k policy was reached
 through a chain of resumes (walking, then arms and height, then litter and
 foot lift); on the farm it worked but wobbled, took balance steps, marched and
 did not come back to a square stance. The task keeps that policy's rewards and
-changes seven things, all in ``_train_from_scratch`` at the bottom of this file:
+changes eight things, all in ``_train_from_scratch`` at the bottom of this file:
 
   1  gait period 0.60 s -> 0.85 s (a calm walk instead of a march)
   2  stiff leg gains (GR00T decoupled-WBC table) with a uniform 0.25 action scale
@@ -15,6 +15,9 @@ changes seven things, all in ``_train_from_scratch`` at the bottom of this file:
   7  a torso-upright term while standing and a stronger foot-squaring term
      (added after the first 2,000-iteration trial of 1-6, which walked forward
      well but stood leaning 9.7 deg forward with its feet 5-6 cm staggered)
+  8  a gait reward that pays nothing for standing still under a walk command
+     (added at 4,000 iterations of the full run: pure sideways commands were
+     answered by standing; turning and backward walking were already learned)
 
 ``legacy=True`` builds the task exactly as the 91.5k policy was trained. The
 egg-tray task (frozen 91.5k legs) and any evaluation of the old checkpoints use
@@ -251,7 +254,18 @@ def _train_from_scratch(cfg, play):
 
   # (1) Gait period: the clock the actor sees, the gait reward, and the swing
   # schedule the foot-level term reads.
-  cfg.rewards["foot_gait"].params["period"] = GAIT_PERIOD
+  # (8) The gait reward pays for swinging on schedule and nothing for standing
+  # still under a walk command (see settle.gait_swing). A perfect gait earns
+  # 1.0 per second; the shared feet_gait it replaces earned 0.5, of which a
+  # robot that never stepped kept 0.28.
+  gait = cfg.rewards["foot_gait"].params
+  cfg.rewards["foot_gait"] = RewardTermCfg(
+    func=settle.gait_swing, weight=1.0,
+    params={
+      "sensor_name": gait["sensor_name"], "period": GAIT_PERIOD,
+      "stance_fraction": gait["threshold"], "offset": tuple(gait["offset"]),
+    },
+  )
   cfg.actions["poultry_surface"].period = GAIT_PERIOD
 
   # (2) + (4) Stiff gains with every motor behind a command delay, and one

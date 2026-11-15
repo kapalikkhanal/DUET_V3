@@ -1,0 +1,8 @@
+{
+  "checkpoint": "Duet_V3/model_4000.pt",
+  "iteration": 4000,
+  "checkpoint_sha256": "7ce1c13b801e6f52ec1567fc80398ea491fa66ad77abc2e58bb69d6cb66c5699",
+  "policy_sha256": "fd0d4e7c275838345477452d250ec983618e999fbd6c83c411783ea69cce908c",
+  "onnx_vs_checkpoint_inputs": 100,
+  "onnx_vs_checkpoint_max_abs_error": 6.67572021484375e-06
+}
