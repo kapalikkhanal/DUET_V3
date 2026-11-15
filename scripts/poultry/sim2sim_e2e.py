@@ -67,6 +67,7 @@ ap.add_argument("--ctrl", default=None, help="path to g1_ctrl; started with --ne
 ap.add_argument("--scene", default=str(SIM_DIR / config.ROBOT_SCENE))
 ap.add_argument("--keep-band", action="store_true")
 ap.add_argument("--viewer", action="store_true", help="open the MuJoCo window")
+ap.add_argument("--save", default=None, help="write the per-step motion log (npz) here")
 ap.add_argument("--long-walk", type=float, nargs=3, metavar=("VX", "VY", "YAW"), default=None,
                 help="instead of the standard sequence, hold this one command for 30 s after standing "
                      "(about 80 steps, enough for a trustworthy step-regularity number)")
@@ -122,9 +123,24 @@ class _NoCtrl:
     return getattr(self._data, name)
 
 
-bridge = UnitreeSdk2Bridge(m, d)  # reads the publish period from the model: still sim_dt here
-if not a.stock_bridge:
-  bridge.mj_data = _NoCtrl(d)
+latest = {"msg": None, "count": 0, "stamps": []}
+
+
+class _LeanBridge(UnitreeSdk2Bridge):
+  """The stock bridge without its per-message torque loop (29 motors in Python,
+  ~830 times a second), which starves the simulator thread of CPU time."""
+
+  def LowCmdHandler(self, msg):
+    latest["msg"] = msg
+    latest["count"] += 1
+    if latest["count"] % 8 == 0:
+      latest["stamps"].append(time.monotonic())
+
+
+if a.stock_bridge:
+  bridge = UnitreeSdk2Bridge(m, d)  # reads the publish period from the model: still sim_dt here
+else:
+  bridge = _LeanBridge(m, d)
 m.opt.timestep = a.sim_dt / a.substeps
 bridge.SetupDDSWireless()
 band = ElasticBand()
@@ -186,17 +202,6 @@ next_sync = 0.0
 from unitree_sdk2py.core.channel import ChannelSubscriber  # noqa: E402
 from unitree_sdk2py.idl.unitree_hg.msg.dds_ import LowCmd_  # noqa: E402
 
-latest = {"msg": None, "count": 0, "stamps": []}
-
-
-def _on_cmd(msg):
-  latest["msg"] = msg
-  latest["count"] += 1
-  latest["stamps"].append(time.monotonic())
-
-
-_cmd_sub = ChannelSubscriber("rt/lowcmd", LowCmd_)
-_cmd_sub.Init(_on_cmd, 10)
 NU = m.nu
 SPD, XY, GAIT = [], [], []
 QADR = np.array([m.jnt_qposadr[m.actuator_trnid[i, 0]] for i in range(NU)])
@@ -233,8 +238,10 @@ while ((t := time.monotonic() - t0) < END or a.manual) and (viewer is None or vi
     mujoco.mj_step(m, d)
     sim_t += m.opt.timestep
   if not a.manual:  # kept cheap: anything slow here makes the simulator fall behind real time
+    cb = m.geom_bodyid[d.contact.geom[:d.ncon]] if d.ncon else np.zeros((0, 2), int)  # bodies in contact
     GAIT.append((t, d.qpos[0], d.qpos[1], d.qpos[3], d.qpos[4], d.qpos[5], d.qpos[6],
-                 d.xpos[foot_ids[0], 2], d.xpos[foot_ids[1], 2], sim_t))
+                 d.xpos[foot_ids[0], 2], d.xpos[foot_ids[1], 2], sim_t,
+                 (cb == foot_ids[0]).any(), (cb == foot_ids[1]).any()))
   if 11.0 <= t < 17.0 and not a.manual:
     SPD.append((d.sensordata[NU + 5], d.sensordata[NU + 12]))
     XY.append((d.qpos[0], d.qpos[1]))
@@ -257,7 +264,7 @@ while ((t := time.monotonic() - t0) < END or a.manual) and (viewer is None or vi
     time.sleep(lag)
 if len(latest["stamps"]) > 10:
   gaps = np.diff(np.array(latest["stamps"])) * 1000
-  print(f"command messages: {len(gaps) / (latest['stamps'][-1] - latest['stamps'][0]):.0f} per second; "
+  print(f"command messages: {(8 if not a.stock_bridge else 1) * len(gaps) / (latest['stamps'][-1] - latest['stamps'][0]):.0f} per second; "
         f"gap between messages median {np.median(gaps):.1f} ms, 99% {np.percentile(gaps, 99):.1f} ms, max {gaps.max():.0f} ms "
         f"(motor torque from the {'stock bridge' if a.stock_bridge else 'current state at every physics step'})")
 if SPD:
@@ -266,11 +273,13 @@ if SPD:
         f"(a quiet stance is below 0.1); pelvis travelled {100 * np.linalg.norm(np.array(XY[-1]) - np.array(XY[0])):.0f} cm")
 if GAIT:
   G0 = np.array(GAIT, dtype=float)
+  if a.save:
+    np.savez(a.save, log=G0, columns="wall_t x y qw qx qy qz left_ankle_z right_ankle_z sim_t left_contact right_contact", phases=str(PHASES))
   qw, qx, qy, qz = G0[:, 3], G0[:, 4], G0[:, 5], G0[:, 6]
   gx, gy, gz = -2 * (qx * qz - qw * qy), -2 * (qy * qz + qw * qx), -(1 - 2 * (qx * qx + qy * qy))
   floor_z = np.percentile(G0[:, 7:9], 5, axis=0)  # ankle height with the foot flat on the floor
   G = np.column_stack([G0[:, 0], G0[:, 1], G0[:, 2], 2 * np.arctan2(qz, qw), np.degrees(np.arctan2(-gy, -gz)),
-                       np.degrees(np.arctan2(gx, -gz)), G0[:, 7] < floor_z[0] + 0.012, G0[:, 8] < floor_z[1] + 0.012, G0[:, 9]])
+                       np.degrees(np.arctan2(gx, -gz)), G0[:, 10], G0[:, 11], G0[:, 9]])  # 6, 7: foot touches the floor
   print("\ngait, measured from 1.5 s after each walking command until it ends:")
   print(f"{'phase':>13} | speed m/s | steps/s | step-time jitter | swing L / R s | sway cm | roll deg | pitch deg | heading wobble deg | heading drift deg/s")
   for (ts, label, _, lx, ly, rx), nxt in zip(PHASES, PHASES[1:] + [(END,)]):
