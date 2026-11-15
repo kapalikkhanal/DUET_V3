@@ -72,11 +72,18 @@ SQUAT_FLOOR = 0.22  # m; was HEIGHT_RANGE[0] = 0.24
 # (1) Stride period. The 91.5k policy was trained at 0.60 s and measured
 # 1.63 Hz on the robot: 3.3 foot strikes a second with a 0.24 s swing. At 0.85 s
 # the swing was 0.37 s. deploy.yaml's gait_phase ``period`` must match.
-# 0.85 -> 0.75 at iteration 19,500 of the full run (user, 2026-11-15): the slow
-# stride walked forward with a visible side-to-side sway. Checkpoints up to
-# 19,500 were trained at 0.85; pass that to ``set_gait_period`` (or
-# ``--gait-period`` of the scripts) when testing them.
-GAIT_PERIOD = 0.75
+# 0.85 -> 0.75 at iteration 19,500 of the full run, 0.75 -> 0.70 after 26,500
+# (user, 2026-11-15): the slower the stride, the longer the robot balances on
+# one leg and the more it rocks side to side. Measured roll swing walking
+# forward: 3.5 deg at 0.60 s (91.5k), 6.4 deg at 0.75 s, 7.4 deg at 0.85 s.
+# When testing an older checkpoint give its own period to ``set_gait_period``
+# or to the GAIT_PERIOD argument of probe.py / make_deploy.py.
+GAIT_PERIOD = 0.70
+# Foot lift the swing is asked for, floor-relative: litter depth + 5 cm, kept
+# inside this range (m). The 91.5k task used 0.09-0.11; at a slow stride that
+# is a rocking march (after 26,500, user, 2026-11-15). On the deepest training
+# litter (6 cm) the sole now clears the surface by 3 cm instead of 5.
+LIFT_TARGET_RANGE = (0.07, 0.09)
 # (3) Actor observation history, frames at 50 Hz. HOMIE and GR00T use 6.
 HISTORY = 6
 # (4) Motor command delay, physics steps of 5 ms: 0-20 ms, one value per episode.
@@ -284,6 +291,11 @@ def _train_from_scratch(cfg, play):
     },
   )
   cfg.actions["poultry_surface"].period = GAIT_PERIOD
+
+  for name in ("poultry_clearance", "poultry_swing_height"):
+    cfg.rewards[name].params.update(
+      min_target=LIFT_TARGET_RANGE[0], max_target=LIFT_TARGET_RANGE[1]
+    )
 
   # (2) + (4) Stiff gains with every motor behind a command delay, and one
   # action unit = 0.25 rad on every policy joint.

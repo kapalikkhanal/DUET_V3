@@ -3,7 +3,8 @@
 Same robot model and SDK bridge as ~/unitree_mujoco/simulate_python, with one
 difference that matters: the motor PD torque is computed from the current joint
 state at every physics step, and the physics runs at 2.5 ms. The stock Python
-simulator computes it in another thread from states up to 5 ms old; with stiff,
+simulator computes it in another thread from sensor values that are one 5 ms
+step old (MuJoCo fills the sensors before it integrates a step); with stiff,
 lightly damped gains (ankle 40/2, waist 250/5) that makes the ankles and waist
 ring at ~30 Hz, and a policy that is fine looks as if it cannot stand. A real
 motor runs its PD loop far faster than either. --stock-bridge --substeps 1
@@ -66,6 +67,9 @@ ap.add_argument("--ctrl", default=None, help="path to g1_ctrl; started with --ne
 ap.add_argument("--scene", default=str(SIM_DIR / config.ROBOT_SCENE))
 ap.add_argument("--keep-band", action="store_true")
 ap.add_argument("--viewer", action="store_true", help="open the MuJoCo window")
+ap.add_argument("--long-walk", type=float, nargs=3, metavar=("VX", "VY", "YAW"), default=None,
+                help="instead of the standard sequence, hold this one command for 30 s after standing "
+                     "(about 80 steps, enough for a trustworthy step-regularity number)")
 ap.add_argument("--manual", action="store_true",
                 help="no scripted remote and no time limit: drive it with keyboard.py; the band is "
                      "released with key 9 in the window. Needs --viewer.")
@@ -141,6 +145,10 @@ PHASES = [  # (start s, label, keys, lx, ly, rx)
   (54, "backward 0.3", 0, 0, -0.3, 0), (60, "stop", 0, 0, 0, 0),
 ]
 END = 64.0
+if a.long_walk:
+  vx, vy, wz = a.long_walk
+  PHASES = PHASES[:5] + [(14, f"walk {vx:g} {vy:g} {wz:g}", 0, -vy, vx, -wz), (44, "stop", 0, 0, 0, 0)]
+  END = 47.0
 t0 = time.monotonic()
 
 
@@ -191,6 +199,8 @@ _cmd_sub = ChannelSubscriber("rt/lowcmd", LowCmd_)
 _cmd_sub.Init(_on_cmd, 10)
 NU = m.nu
 SPD, XY, GAIT = [], [], []
+QADR = np.array([m.jnt_qposadr[m.actuator_trnid[i, 0]] for i in range(NU)])
+VADR = np.array([m.jnt_dofadr[m.actuator_trnid[i, 0]] for i in range(NU)])
 
 
 def pitch_roll():
@@ -217,7 +227,9 @@ while ((t := time.monotonic() - t0) < END or a.manual) and (viewer is None or vi
     cmd = np.array([(mc[i].tau, mc[i].kp, mc[i].q, mc[i].kd, mc[i].dq) for i in range(NU)]).T
   for _ in range(a.substeps):
     if cmd is not None:
-      d.ctrl[:NU] = cmd[0] + cmd[1] * (cmd[2] - d.sensordata[:NU]) + cmd[3] * (cmd[4] - d.sensordata[NU:2 * NU])
+      # From the state itself, not from sensordata: after mj_step the sensors
+      # still hold the values from BEFORE that step, i.e. one step of delay.
+      d.ctrl[:NU] = cmd[0] + cmd[1] * (cmd[2] - d.qpos[QADR]) + cmd[3] * (cmd[4] - d.qvel[VADR])
     mujoco.mj_step(m, d)
     sim_t += m.opt.timestep
   if not a.manual:  # kept cheap: anything slow here makes the simulator fall behind real time
