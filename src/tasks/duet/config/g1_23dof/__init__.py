@@ -87,3 +87,16 @@ register_mjlab_task(
   rl_cfg=poultry_surface_ppo_runner_cfg(legacy=True),
   runner_cls=DuetOnPolicyRunner,
 )
+
+# PoultrySurface plus a commanded forward lean for floor pickup (one extra
+# policy input). Fine-tuned from a PoultrySurface checkpoint widened with
+# scripts/poultry/add_lean_input.py. The PoultrySurface task is unchanged.
+from .poultry_lean import unitree_g1_23dof_duet_poultry_lean_env_cfg  # noqa: E402
+
+register_mjlab_task(
+  task_id="Unitree-G1-23Dof-Duet-PoultrySurface-Lean",
+  env_cfg=unitree_g1_23dof_duet_poultry_lean_env_cfg(),
+  play_env_cfg=unitree_g1_23dof_duet_poultry_lean_env_cfg(play=True),
+  rl_cfg=poultry_surface_ppo_runner_cfg(),
+  runner_cls=DuetOnPolicyRunner,
+)

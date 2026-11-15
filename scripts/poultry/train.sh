@@ -13,6 +13,9 @@
 #     bash scripts/poultry/train.sh full 30000
 # MAX_ITERS is then the number of ADDITIONAL iterations.
 #
+# TASK=<task id> trains another task with the same launcher, e.g. the lean
+# variant: TASK=Unitree-G1-23Dof-Duet-PoultrySurface-Lean (see add_lean_input.py).
+#
 # Set PYTHON to the interpreter that has mjlab 1.2.0 (default: python).
 set -euo pipefail
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
@@ -34,7 +37,7 @@ fi
 
 echo "PoultrySurface: $ITERS iterations, $ENVS robots, seed $SEED, run '$NAME'. Log: logs/poultry_${NAME}.log"
 PYTHONPATH=. PYTHONUNBUFFERED=1 WANDB_MODE=disabled \
-  "$PY" scripts/train.py Unitree-G1-23Dof-Duet-PoultrySurface \
+  "$PY" scripts/train.py "${TASK:-Unitree-G1-23Dof-Duet-PoultrySurface}" \
   --env.scene.num-envs "$ENVS" --agent.max-iterations "$ITERS" --agent.seed "$SEED" \
   --agent.logger tensorboard --agent.upload-model False --agent.run-name "$NAME" \
   "${RESUME_ARGS[@]}" > "logs/poultry_${NAME}.log" 2>&1

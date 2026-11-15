@@ -47,6 +47,7 @@ _TERM_RULES: dict[str, tuple[list[int], list[float]]] = {
   "foot_contact": ([1, 0], [1.0, 1.0]),
   "foot_contact_forces": ([3, 4, 5, 0, 1, 2], [1.0, -1.0, 1.0, 1.0, -1.0, 1.0]),
   "height_command": ([0], [1.0]),
+  "lean_command": ([0], [1.0]),  # forward pitch: unchanged by a left-right mirror
 }
 
 # Caches keyed by env id: action perm/sign (no obs needed) and per-group perm/sign.
