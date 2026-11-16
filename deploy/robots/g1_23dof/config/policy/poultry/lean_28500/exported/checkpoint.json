@@ -1,0 +1,8 @@
+{
+  "checkpoint": "2026-11-15_15-42-18_lean/model_28500.pt",
+  "iteration": 28500,
+  "checkpoint_sha256": "33124e3bdf67af20d7a5d2a155c053dc08efdaa8af73b79837b3e842dd25b26e",
+  "policy_sha256": "55e12f89cc7982e4f6722212afd2de0d42bf2b54240b6d6f5e2d9e295f431dad",
+  "onnx_vs_checkpoint_inputs": 100,
+  "onnx_vs_checkpoint_max_abs_error": 1.049041748046875e-05
+}

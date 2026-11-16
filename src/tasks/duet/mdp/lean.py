@@ -54,6 +54,9 @@ class LeanCommandCfg(CommandTermCfg):
   """How fast the commanded value moves toward its target, rad/s."""
   stoop_height_range: tuple[float, float] = (0.42, 0.62)
   """Pelvis height commands allowed while a lean is asked for, m."""
+  stoop_floor_stages: tuple[tuple[int, float], ...] | None = None
+  """Optional (policy step, m) knots for the LOWER end of that range, so it can
+  open downward gradually; the final knot should equal ``stoop_height_range[0]``."""
   height_command_name: str = "base_height"
 
   def build(self, env: ManagerBasedRlEnv) -> LeanCommand:
@@ -75,6 +78,12 @@ class LeanCommand(CommandTerm):
   @property
   def max_lean(self) -> float:
     return piecewise_linear(int(self._env.common_step_counter), self.cfg.max_lean_stages)
+
+  @property
+  def stoop_floor(self) -> float:
+    if not self.cfg.stoop_floor_stages:
+      return self.cfg.stoop_height_range[0]
+    return piecewise_linear(int(self._env.common_step_counter), self.cfg.stoop_floor_stages)
 
   @property
   def active(self) -> torch.Tensor:
@@ -105,7 +114,7 @@ class LeanCommand(CommandTerm):
     height = self._env.command_manager.get_term(self.cfg.height_command_name)
     ids = (self.target > 0.0).nonzero(as_tuple=False).flatten()
     if len(ids):
-      lo, hi = self.cfg.stoop_height_range
+      lo, hi = self.stoop_floor, self.cfg.stoop_height_range[1]
       height._squat_target[ids] = height._squat_target[ids].clamp(lo, hi)
       still = ids[standing[ids]]
       height._height[still] = height._squat_target[still]
@@ -204,7 +213,7 @@ def fell_over_lean(
   env: ManagerBasedRlEnv,
   limit_angle: float,
   lean_margin: float = 0.5,
-  min_height: float = 0.28,
+  min_height: float = 0.24,
   asset_cfg: SceneEntityCfg = _ROBOT,
 ) -> torch.Tensor:
   """Fallen: the old 60 deg rule, widened forward by the commanded lean.

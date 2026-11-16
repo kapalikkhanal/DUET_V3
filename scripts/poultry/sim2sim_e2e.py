@@ -60,7 +60,7 @@ from unitree_sdk2py.idl.default import unitree_go_msg_dds__WirelessController_  
 from unitree_sdk2py.idl.unitree_go.msg.dds_ import WirelessController_  # noqa: E402
 from unitree_sdk2py_bridge import ElasticBand, UnitreeSdk2Bridge  # noqa: E402
 
-KEY_F1, KEY_F2 = 1 << 6, 1 << 7
+KEY_F1, KEY_F2, KEY_X = 1 << 6, 1 << 7, 1 << 10
 
 ap = argparse.ArgumentParser()
 ap.add_argument("--ctrl", default=None, help="path to g1_ctrl; started with --network lo")
@@ -68,6 +68,9 @@ ap.add_argument("--scene", default=str(SIM_DIR / config.ROBOT_SCENE))
 ap.add_argument("--keep-band", action="store_true")
 ap.add_argument("--viewer", action="store_true", help="open the MuJoCo window")
 ap.add_argument("--save", default=None, help="write the per-step motion log (npz) here")
+ap.add_argument("--lean-test", action="store_true",
+                help="instead of the standard sequence: stand, press X (lean down to the pick pose), "
+                     "hold 14 s, press X again (stand up), then walk forward. For lean policies.")
 ap.add_argument("--long-walk", type=float, nargs=3, metavar=("VX", "VY", "YAW"), default=None,
                 help="instead of the standard sequence, hold this one command for 30 s after standing "
                      "(about 80 steps, enough for a trustworthy step-regularity number)")
@@ -161,6 +164,13 @@ PHASES = [  # (start s, label, keys, lx, ly, rx)
   (54, "backward 0.3", 0, 0, -0.3, 0), (60, "stop", 0, 0, 0, 0),
 ]
 END = 64.0
+if a.lean_test:
+  PHASES = PHASES[:5] + [
+    (14, "X: lean", KEY_X, 0, 0, 0), (14.2, "leaning", 0, 0, 0, 0),
+    (28, "X: stand up", KEY_X, 0, 0, 0), (28.2, "standing", 0, 0, 0, 0),
+    (34, "forward 0.4", 0, 0, 0.4, 0), (38, "stop", 0, 0, 0, 0),
+  ]
+  END = 41.0
 if a.long_walk:
   vx, vy, wz = a.long_walk
   PHASES = PHASES[:5] + [(14, f"walk {vx:g} {vy:g} {wz:g}", 0, -vy, vx, -wz), (44, "stop", 0, 0, 0, 0)]
@@ -219,7 +229,9 @@ def pitch_roll():
 
 print(f"scene {a.scene}\nmotor torque: {'stock bridge' if a.stock_bridge else 'computed every physics step'}; step {m.opt.timestep} s, band {'kept' if a.keep_band else f'released at {a.release_at:g} s'}, "
       f"band length {band.length:.2f} m, policy {a.policy_dir or 'from config.yaml'}")
-print(f"{'t':>5} {'phase':>13} {'band':>4} {'pelvis z':>8} {'x cm':>7} {'y cm':>7} {'yaw deg':>7} {'pitch':>6} {'roll':>6} {'feet on floor':>13}")
+print(f"{'t':>5} {'phase':>13} {'band':>4} {'pelvis z':>8} {'x cm':>7} {'y cm':>7} {'yaw deg':>7} {'pitch':>6} {'roll':>6} {'feet on floor':>13} {'wrist cm':>8}")
+hand_ids = [mujoco.mj_name2id(m, mujoco.mjtObj.mjOBJ_BODY, n) for n in ("left_wrist_roll_rubber_hand", "right_wrist_roll_rubber_hand")]
+hand_ids = [i for i in hand_ids if i >= 0]
 next_log, sim_t, fell = 0.0, 0.0, False
 foot_ids = [m.body(n).id for n in ("left_ankle_roll_link", "right_ankle_roll_link")]
 while ((t := time.monotonic() - t0) < END or a.manual) and (viewer is None or viewer.is_running()):
@@ -250,7 +262,7 @@ while ((t := time.monotonic() - t0) < END or a.manual) and (viewer is None or vi
     yaw = np.degrees(2 * np.arctan2(d.qpos[6], d.qpos[3]))
     floor = {m.geom_bodyid[c.geom1] for c in d.contact[:d.ncon]} | {m.geom_bodyid[c.geom2] for c in d.contact[:d.ncon]}
     feet = sum(f in floor for f in foot_ids)
-    print(f"{t:5.1f} {'manual' if a.manual else phase(t)[1]:>13} {'on' if band.enable else 'off':>4} {d.qpos[2]:8.3f} {100 * d.qpos[0]:+7.1f} {100 * d.qpos[1]:+7.1f} {yaw:+7.1f} {p:+6.1f} {r:+6.1f} {feet:>13}")
+    print(f"{t:5.1f} {'manual' if a.manual else phase(t)[1]:>13} {'on' if band.enable else 'off':>4} {d.qpos[2]:8.3f} {100 * d.qpos[0]:+7.1f} {100 * d.qpos[1]:+7.1f} {yaw:+7.1f} {p:+6.1f} {r:+6.1f} {feet:>13} {100 * min(d.xpos[i, 2] for i in hand_ids) if hand_ids else float('nan'):8.1f}")
     sys.stdout.flush()
     next_log += 1.0
     if d.qpos[2] < 0.35 and not fell:

@@ -127,6 +127,26 @@ REGISTER_OBSERVATION(velocity_commands)
     return obs;
 }
 
+// Forward lean ("stoop") for floor pickup, used by policies trained on the
+// PoultrySurface-Lean task. Shared between lean_command (which owns it) and
+// base_height_command (which holds the pick height while a lean is asked for).
+// Policies without a lean_command observation never touch it: target stays 0
+// and base_height_command behaves exactly as before.
+struct LeanState
+{
+    bool configured = false;
+    float target = 0.0f;       // lean asked for, rad (0 = upright)
+    float value = 0.0f;        // rate-limited value the policy sees
+    float h_lo = 0.0f;         // stoop band: heights allowed while leaning, m
+    float h_hi = 0.0f;
+    float pick_height = 0.0f;  // height held while leaning, adjusted with D-pad Up/Down
+};
+inline LeanState & lean_state()
+{
+    static LeanState s;
+    return s;
+}
+
 REGISTER_OBSERVATION(base_height_command)
 {
     // Target base (pelvis) height, driven by the remote D-pad:
@@ -150,10 +170,20 @@ REGISTER_OBSERVATION(base_height_command)
     static float target = standstill;               // start at the resting height
     const float ADJ_RATE = 0.40f;                   // m/s — how fast Up/Down move the target
     const float adj_step = ADJ_RATE * env->step_dt;
-    if (joystick->up.pressed)   target += adj_step;
-    if (joystick->down.pressed) target -= adj_step;
-    if (joystick->left.pressed)  target = 0.60f;  // D-pad Left: walk-height preset (walk-band floor)
-    if (joystick->right.pressed) target = hi;     // D-pad Right: full-stand preset (top of deploy.yaml range)
+    auto & lean = lean_state();
+    const bool leaning = lean.configured && lean.target > 0.0f;
+    if (leaning) {
+        // While a lean is asked for, Up/Down move the pick height inside the
+        // stoop band and leave the standing target alone.
+        if (joystick->up.pressed)   lean.pick_height += adj_step;
+        if (joystick->down.pressed) lean.pick_height -= adj_step;
+        lean.pick_height = std::clamp(lean.pick_height, lean.h_lo, lean.h_hi);
+    } else {
+        if (joystick->up.pressed)   target += adj_step;
+        if (joystick->down.pressed) target -= adj_step;
+        if (joystick->left.pressed)  target = 0.60f;  // D-pad Left: walk-height preset (walk-band floor)
+        if (joystick->right.pressed) target = hi;     // D-pad Right: full-stand preset (top of deploy.yaml range)
+    }
     target = std::clamp(target, lo, hi);
 
     // Velocity/height decoupling (Run-7 walk band): the policy learned to WALK at
@@ -180,6 +210,8 @@ REGISTER_OBSERVATION(base_height_command)
     else idle_time += env->step_dt;
     if (stick || idle_time < settle) {
         cmd_target = std::max(target, WALK_MIN);
+    } else if (leaning) {
+        cmd_target = lean.pick_height;  // the policy was trained to lean only at these heights
     }
 
     // Velocity-limited ramp so the squat glides smoothly instead of jumping.
@@ -267,6 +299,58 @@ REGISTER_OBSERVATION(base_height_command)
     }
 
     return std::vector<float>{ h };
+}
+
+REGISTER_OBSERVATION(lean_command)
+{
+    // Torso pitch the policy is asked to hold, rad; 0 = upright. Mirrors
+    // LeanCommand in src/tasks/duet/mdp/lean.py:
+    //   * only while standing: it waits `settle` seconds after the sticks are
+    //     released, and any stick input cancels it;
+    //   * it moves toward its target at `rate` rad/s in both directions;
+    //   * while it is asked for, base_height_command holds the pick height.
+    // Button X toggles between upright and `pick` (commands.lean in deploy.yaml).
+    auto & joystick = env->robot->data.joystick;
+    const auto cfg = env->cfg["commands"]["lean"];
+    const float max_lean = cfg["max"].as<float>();
+    const float pick = std::min(cfg["pick"] ? cfg["pick"].as<float>() : max_lean, max_lean);
+    const float rate = cfg["rate"] ? cfg["rate"].as<float>() : 0.8f;
+    const float settle = cfg["settle"] ? cfg["settle"].as<float>() : 0.0f;
+
+    auto & lean = lean_state();
+    if (!lean.configured) {
+        lean.h_lo = cfg["height_range"][0].as<float>();
+        lean.h_hi = cfg["height_range"][1].as<float>();
+        lean.pick_height = std::clamp(cfg["height"] ? cfg["height"].as<float>() : lean.h_lo,
+                                      lean.h_lo, lean.h_hi);
+        lean.configured = true;
+    }
+
+    const float DEAD = 0.05f;
+    const bool stick = std::fabs(joystick->ly()) > DEAD ||
+                       std::fabs(joystick->lx()) > DEAD ||
+                       std::fabs(joystick->rx()) > DEAD;
+    static float idle_time = 1e9f;  // starts settled
+    static bool prev_x = false;
+    if (stick) { idle_time = 0.0f; lean.target = 0.0f; }  // walking cancels the lean
+    else idle_time += env->step_dt;
+    const bool x = joystick->X.pressed;
+    if (x && !prev_x && !stick) lean.target = (lean.target > 0.0f) ? 0.0f : pick;
+    prev_x = x;
+
+    const float goal = (idle_time >= settle) ? lean.target : 0.0f;
+    const float max_step = rate * env->step_dt;
+    lean.value += std::clamp(goal - lean.value, -max_step, max_step);
+
+    static int _lean_print = 0;
+    if (++_lean_print % 25 == 0 && (lean.target > 0.0f || lean.value > 0.0f)) {
+        const auto & gb = env->robot->data.projected_gravity_b;
+        printf("[lean] cmd = %.2f rad (%.0f deg) | torso = %.0f deg | pick height %.2f m\n",
+               lean.value, lean.value * 57.2958f,
+               std::atan2(gb[0], -gb[2]) * 57.2958f, lean.pick_height);
+        fflush(stdout);
+    }
+    return std::vector<float>{ lean.value };
 }
 
 REGISTER_OBSERVATION(gait_phase)

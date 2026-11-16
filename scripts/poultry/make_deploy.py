@@ -66,6 +66,7 @@ OBS = {
   "joint_vel": ("joint_vel_rel", {}),
   "actions": ("last_action", {"clip": [-15.0, 15.0]}),
   "height_command": ("base_height_command", {}),
+  "lean_command": ("lean_command", {}),
 }
 
 
@@ -86,6 +87,12 @@ def main() -> int:
   out = ROOT / "deploy/robots/g1_23dof/config/policy/poultry" / name
   (out / "exported").mkdir(parents=True, exist_ok=True)
   (out / "params").mkdir(parents=True, exist_ok=True)
+
+  # A checkpoint of the lean task has one more input per frame (see add_lean_input.py).
+  global TASK
+  n_in = torch.load(ckpt, map_location="cpu", weights_only=False)["actor_state_dict"]["mlp.0.weight"].shape[1]
+  if n_in == 72 * P.HISTORY:
+    TASK += "-Lean"
 
   # The TRAINING config, so the curriculum can be advanced to this checkpoint.
   cfg = load_env_cfg(TASK)
@@ -169,6 +176,18 @@ def main() -> int:
     },
     "observations": observations,
   }
+  if "lean" in u.command_manager.active_terms:
+    lean_term = u.command_manager.get_term("lean")
+    lean_max = float(np.floor(lean_term.max_lean * 100) / 100)
+    stoop_lo = float(np.ceil(lean_term.stoop_floor * 100) / 100)
+    deploy["commands"]["lean"] = {
+      "max": lean_max,  # largest lean the curriculum had reached, rad
+      "pick": lean_max,  # lean asked for by button X
+      "rate": lean_term.cfg.rate,
+      "settle": P.SETTLE_TIME,
+      "height_range": [stoop_lo, float(lean_term.cfg.stoop_height_range[1])],
+      "height": max(stoop_lo, 0.36),  # pelvis height held while leaning (D-pad Up/Down adjusts)
+    }
   header = (
     f"# PoultrySurface {run_dir.name}/{ckpt_name} (iteration {iteration}).\n"
     f"# {P.HISTORY} frames per observation term: {meta['obs_dim']} inputs, {n_act} actions. "

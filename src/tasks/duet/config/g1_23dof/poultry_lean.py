@@ -25,15 +25,19 @@ from src.tasks.duet.mdp import lean
 
 from .poultry_surface import unitree_g1_23dof_duet_poultry_surface_env_cfg
 
-# Largest lean, rad (72 deg). With the pelvis at 0.45-0.50 m this puts the
-# shoulders low and ahead of the knees, so a straight arm reaches the floor.
-LEAN_MAX = 1.25
-# The largest lean drawn opens up over the first 2,000 iterations of the
-# fine-tune, which starts from PoultrySurface iteration 26,500. (Iteration
-# counts continue from the checkpoint.)
-LEAN_STAGES = ((26_500, 0.35), (28_500, LEAN_MAX))
-# Pelvis heights commanded together with a lean, m.
-STOOP_HEIGHT = (0.42, 0.62)
+# Largest lean, rad (77 deg), and the pelvis heights commanded with a lean, m.
+# Measured at iteration 28,500 (lean then up to 72 deg, heights 0.42-0.62): the
+# lean is tracked to 65-68 deg with no falls, but at a 0.43 m pelvis the
+# shoulder is still 55 cm up and the fingertips stop 12 cm above the floor.
+# The shoulder sits 0.30 m from the pelvis and the wrist 0.29 m below the
+# shoulder, so the hands touch down near a 0.34 m pelvis at 75 deg. Hence the
+# lower heights and the slightly larger lean.
+LEAN_MAX = 1.35
+STOOP_HEIGHT = (0.32, 0.62)
+# Schedules in iterations, which continue from the PoultrySurface checkpoint
+# the fine-tune starts from (26,500): the lean opens first, then the heights.
+LEAN_STAGES = ((26_500, 0.35), (28_500, 1.25), (29_500, LEAN_MAX))
+STOOP_FLOOR_STAGES = ((28_500, 0.42), (29_500, STOOP_HEIGHT[0]))
 
 
 def unitree_g1_23dof_duet_poultry_lean_env_cfg(play=False):
@@ -46,6 +50,7 @@ def unitree_g1_23dof_duet_poultry_lean_env_cfg(play=False):
     resampling_time_range=(4.0, 10.0),
     max_lean_stages=((0, LEAN_MAX),) if play else tuple((i * ITER, v) for i, v in LEAN_STAGES),
     stoop_height_range=STOOP_HEIGHT,
+    stoop_floor_stages=None if play else tuple((i * ITER, v) for i, v in STOOP_FLOOR_STAGES),
   )
   # The new input: LAST in both groups, so an older network only needs extra
   # input columns appended.

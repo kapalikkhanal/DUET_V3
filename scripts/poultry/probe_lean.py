@@ -54,6 +54,7 @@ hand = bn.index("left_wrist_roll_rubber_hand")
 elbow = [i for i, n in enumerate(bn) if n.startswith("left_elbow")][0]
 ankle = bn.index("left_ankle_roll_link")
 torso = bn.index("torso_link")
+shoulder = [i for i, n in enumerate(bn) if n.startswith("left_shoulder_pitch")][0]
 home = arm.default_pose.clone()
 
 
@@ -89,8 +90,10 @@ def step(h: float, lean: float, arms: torch.Tensor) -> torch.Tensor:
 
 
 obs = env.get_observations()
-print("height cmd | lean cmd | lean reached | pelvis | wrist above floor | tip above floor | tip ahead of ankle | drift | fell while leaning | fell standing up")
-for h, lean in ((0.78, 0.0), (0.50, 0.0), (0.50, 0.5), (0.50, 0.9), (0.50, 1.25), (0.44, 1.25), (0.58, 1.25)):
+print("height cmd | lean cmd | lean reached | pelvis | shoulder height | wrist above floor | tip above floor | tip ahead of ankle | drift | fell while leaning | fell standing up")
+CASES = ((0.78, 0.0), (0.50, 0.0), (0.50, 0.5), (0.50, 0.9), (0.50, 1.25), (0.58, 1.25))
+CASES += tuple((h, 1.25) for h in (0.44, 0.40, 0.36, 0.32) if h >= ln.cfg.stoop_height_range[0] - 1e-6)
+for h, lean in CASES:
   with torch.inference_mode():
     env.reset()
     obs = env.get_observations()
@@ -114,7 +117,8 @@ for h, lean in ((0.78, 0.0), (0.50, 0.0), (0.50, 0.5), (0.50, 0.9), (0.50, 1.25)
     n_ok = max(int(ok.sum()), 1)
     row = (
       f"   {h:.2f}    |  {lean:4.2f} rad ({lean * 57.3:2.0f} deg) | {float(pitch[ok].sum()) / n_ok:+6.1f} deg | "
-      f"{float(robot.data.root_link_pos_w[ok, 2].sum()) / n_ok:.3f} | {100 * float(hp[ok, 2].sum()) / n_ok:9.1f} cm      | "
+      f"{float(robot.data.root_link_pos_w[ok, 2].sum()) / n_ok:.3f} | {100 * float(robot.data.body_link_pos_w[ok, shoulder, 2].sum()) / n_ok:8.1f} cm     | "
+      f"{100 * float(hp[ok, 2].sum()) / n_ok:9.1f} cm      | "
       f"{100 * float(tip[ok, 2].sum()) / n_ok:7.1f} cm      | {100 * float(((tip - ap) * heading).sum(1)[ok].sum()) / n_ok:8.1f} cm        | "
       f"{100 * float((robot.data.root_link_pos_w[:, :2] - p0).norm(dim=1)[ok].sum()) / n_ok:4.1f} cm | {int(fell.sum()):3d} of {N}          |"
     )

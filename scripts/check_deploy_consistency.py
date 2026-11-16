@@ -40,6 +40,7 @@ OBS_NAME_MAP = {
   "joint_vel_rel": "joint_vel",
   "last_action": "actions",
   "base_height_command": "height_command",
+  "lean_command": "lean_command",
 }
 
 # Absolute tolerance for gains/scales. Gains are written to 1 decimal place in
