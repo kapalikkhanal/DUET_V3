@@ -1,0 +1,89 @@
+# PoultrySurface full_e/model_32000.pt (iteration 32000), exported on the workstation.
+# 6 frames per observation term: 426 inputs, 13 actions. Gait period 0.75 s.
+# Same contract as full_26500 (all schedules were complete before 26,500); safety block added.
+joint_ids_map: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 15, 16, 17, 18, 19, 22, 23, 24, 25, 26]
+step_dt: 0.02
+stiffness: [150.0, 150.0, 150.0, 200.0, 40.0, 40.0, 150.0, 150.0, 150.0, 200.0, 40.0, 40.0, 250.0, 40.0,
+  40.0, 40.0, 40.0, 40.0, 40.0, 40.0, 40.0, 40.0, 40.0]
+damping: [2.0, 2.0, 2.0, 4.0, 2.0, 2.0, 2.0, 2.0, 2.0, 4.0, 2.0, 2.0, 5.0, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0,
+  3.0, 3.0, 3.0, 3.0]
+default_joint_pos: [-0.1, 0.0, 0.0, 0.3, -0.2, 0.0, -0.1, 0.0, 0.0, 0.3, -0.2, 0.0, 0.0, 0.35, 0.18, 0.0,
+  0.87, 0.0, 0.35, -0.18, 0.0, 0.87, 0.0]
+safety: {max_abs_action: 15.0, max_abs_action_hold_s: 0.06, tilt_roll_deg: 40.0, tilt_back_deg: 35.0,
+  tilt_forward_deg: 50.0, tilt_lean_margin_deg: 25.0, tilt_hold_s: 0.1, joint_speed_rms: 10.0, start_max_tilt_deg: 20.0,
+  soft_start_s: 0.5}
+commands:
+  base_velocity:
+    ranges:
+      lin_vel_x: [-0.6, 1.0]
+      lin_vel_y: [-0.5, 0.5]
+      ang_vel_z: [-1.0, 1.0]
+      heading: null
+  base_height:
+    range: [0.22, 0.78]
+    standstill: 0.78
+    walk_min: 0.6
+    settle: 1.0
+actions:
+  JointPositionAction:
+    clip:
+    - [-3.22, 3.11]
+    - [-0.85, 3.29]
+    - [-2.98, 2.98]
+    - [-0.74, 3.34]
+    - [-1.99, 1.97]
+    - [-0.98, 0.96]
+    - [-3.33, 3.11]
+    - [-3.29, 0.86]
+    - [-2.98, 2.98]
+    - [-0.74, 3.33]
+    - [-2.02, 1.97]
+    - [-0.95, 0.99]
+    - [-2.86, 2.86]
+    joint_names: [.*]
+    joint_ids: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+    scale: [0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25, 0.25]
+    offset: [-0.1, 0.0, 0.0, 0.3, -0.2, 0.0, -0.1, 0.0, 0.0, 0.3, -0.2, 0.0, 0.0]
+observations:
+  base_ang_vel:
+    params: {}
+    clip: null
+    scale: [1.0, 1.0, 1.0]
+    history_length: 6
+  projected_gravity:
+    params: {}
+    clip: null
+    scale: [1.0, 1.0, 1.0]
+    history_length: 6
+  velocity_commands:
+    params: {command_name: base_velocity}
+    clip: null
+    scale: [1.0, 1.0, 1.0]
+    history_length: 6
+  gait_phase:
+    params: {period: 0.75, settle: 1.0}
+    clip: null
+    scale: [1.0, 1.0]
+    history_length: 6
+  joint_pos_rel:
+    params: {}
+    clip: null
+    scale: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+      1.0, 1.0, 1.0, 1.0, 1.0]
+    history_length: 6
+  joint_vel_rel:
+    params: {}
+    clip: null
+    scale: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0,
+      1.0, 1.0, 1.0, 1.0, 1.0]
+    history_length: 6
+  last_action:
+    params: {}
+    clip: [-15.0, 15.0]
+    scale: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+    history_length: 6
+  base_height_command:
+    params: {}
+    clip: null
+    scale: [1.0]
+    history_length: 6

@@ -171,7 +171,11 @@ REGISTER_OBSERVATION(base_height_command)
     const float ADJ_RATE = 0.40f;                   // m/s — how fast Up/Down move the target
     const float adj_step = ADJ_RATE * env->step_dt;
     auto & lean = lean_state();
-    const bool leaning = lean.configured && lean.target > 0.0f;
+    // "Leaning" lasts until the lean has ramped out, not only until the button
+    // is pressed again: the robot straightens first and only then rises.
+    // Rising with the torso still far forward makes it step forward to catch
+    // itself (seen in the controller test at the 0.4 rad/s lean rate).
+    const bool leaning = lean.configured && (lean.target > 0.0f || lean.value > 0.1f);
     if (leaning) {
         // While a lean is asked for, Up/Down move the pick height inside the
         // stoop band and leave the standing target alone.

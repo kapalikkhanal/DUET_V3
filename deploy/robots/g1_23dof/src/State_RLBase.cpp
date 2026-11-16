@@ -19,12 +19,33 @@ State_RLBase::State_RLBase(int state_mode, std::string state_string)
     );
     env->alg = std::make_unique<isaaclab::OrtRunner>(policy_dir / "exported" / "policy.onnx");
 
+    // Safety guards. Each one drops to Passive (damping) and logs why.
+    {
+        auto dcfg = YAML::LoadFile(policy_dir / "params" / "deploy.yaml");
+        if (dcfg["safety"]) {
+            auto s = dcfg["safety"];
+            auto get = [&](const char* key, float & v) { if (s[key]) v = s[key].as<float>(); };
+            get("tilt_roll_deg", tilt_roll_deg_);
+            get("tilt_back_deg", tilt_back_deg_);
+            get("tilt_forward_deg", tilt_fwd_deg_);
+            get("tilt_lean_margin_deg", tilt_lean_margin_deg_);
+            get("tilt_hold_s", tilt_hold_s_);
+            get("joint_speed_rms", speed_rms_limit_);
+            get("start_max_tilt_deg", start_max_tilt_deg_);
+            get("soft_start_s", soft_start_s_);
+        }
+        spdlog::info("Safety: Passive if tilt > {:.0f} deg sideways, {:.0f} back, {:.0f} forward (lean + {:.0f}); "
+                     "leg joint speed RMS > {:.0f} rad/s; start refused above {:.0f} deg; soft start {:.1f} s",
+                     tilt_roll_deg_, tilt_back_deg_, tilt_fwd_deg_, tilt_lean_margin_deg_,
+                     speed_rms_limit_, start_max_tilt_deg_, soft_start_s_);
+    }
+    FSMState::lowstate->set_timeout_ms(300);  // no robot state for 0.3 s -> Passive (all states)
     this->registered_checks.emplace_back(
-        std::make_pair(
-            [&]()->bool{ return isaaclab::mdp::bad_orientation(env.get(), 1.0); },
-            FSMStringMap.right.at("Passive")
-        )
-    );
+        std::make_pair([&]()->bool{ return start_refused(); }, FSMStringMap.right.at("Passive")));
+    this->registered_checks.emplace_back(
+        std::make_pair([&]()->bool{ return tilt_guard(); }, FSMStringMap.right.at("Passive")));
+    this->registered_checks.emplace_back(
+        std::make_pair([&]()->bool{ return speed_guard(); }, FSMStringMap.right.at("Passive")));
 
     // Runaway-policy guard: drop to Passive (damping) if the raw policy
     // output stays above guard_max_abs_action_ for guard_hold_s_. Time-based
@@ -49,6 +70,88 @@ State_RLBase::State_RLBase(int state_mode, std::string state_string)
     // message arrives within the timeout the arms fall back to the carry pose.
     arm_sub_ = std::make_shared<unitree::robot::g1::subscription::LowCmd>("rt/arm_targets");
     arm_sub_->set_timeout_ms(200);
+}
+
+namespace {
+// Pelvis pitch (+ forward) and roll in degrees from the measured orientation.
+void pelvis_tilt_deg(LowState_t & ls, float & pitch, float & roll, float & side)
+{
+    const auto & q = ls.msg_.imu_state().quaternion();  // w, x, y, z
+    const float w = q[0], x = q[1], y = q[2], z = q[3];
+    const float gx = -2.0f * (x * z - w * y);
+    const float gy = -2.0f * (y * z + w * x);
+    const float gz = -(1.0f - 2.0f * (x * x + y * y));
+    pitch = std::atan2(gx, -gz) * 57.2958f;
+    roll = std::atan2(-gy, -gz) * 57.2958f;
+    side = std::asin(std::clamp(std::fabs(gy), 0.0f, 1.0f)) * 57.2958f;  // sideways tilt, valid at any pitch
+}
+}  // namespace
+
+void State_RLBase::begin_safety()
+{
+    const auto & jmap = env->robot->data.joint_ids_map;
+    const int n_lower = env->action_manager->total_action_dim();
+    q_entry_.resize(n_lower);
+    for (int i = 0; i < n_lower; ++i)
+        q_entry_[i] = lowstate->msg_.motor_state()[(int)jmap[i]].q();
+    speed_ms_.assign(n_lower, 0.0f);
+    enter_tp_ = speed_last_tp_ = std::chrono::steady_clock::now();
+    policy_ready_ = false;
+    tilt_violating_ = false;
+
+    float pitch, roll, side;
+    pelvis_tilt_deg(*lowstate, pitch, roll, side);
+    start_refused_ = std::fabs(pitch) > start_max_tilt_deg_ || side > start_max_tilt_deg_;
+    if (start_refused_)
+        spdlog::error("Safety: policy start refused, robot is tilted (pitch {:+.0f} deg, roll {:+.0f} deg, "
+                      "limit {:.0f}) -> Passive", pitch, roll, start_max_tilt_deg_);
+}
+
+bool State_RLBase::start_refused()
+{
+    const bool r = start_refused_;
+    start_refused_ = false;
+    return r;
+}
+
+bool State_RLBase::tilt_guard()
+{
+    float pitch, roll, side;
+    pelvis_tilt_deg(*lowstate, pitch, roll, side);
+    const float lean_deg = isaaclab::mdp::lean_state().value * 57.2958f;
+    const float fwd_limit = std::max(tilt_fwd_deg_, lean_deg + tilt_lean_margin_deg_);
+    const bool bad = side > tilt_roll_deg_ || pitch < -tilt_back_deg_ || pitch > fwd_limit;
+    if (!bad) { tilt_violating_ = false; return false; }
+    const auto now = std::chrono::steady_clock::now();
+    if (!tilt_violating_) { tilt_violating_ = true; tilt_since_ = now; return false; }
+    if (std::chrono::duration<float>(now - tilt_since_).count() < tilt_hold_s_) return false;
+    spdlog::error("Safety: tilt pitch {:+.0f} deg (allowed {:+.0f}..{:+.0f}), sideways {:.0f} deg (allowed {:.0f}) "
+                  "for {:.0f} ms -> Passive", pitch, -tilt_back_deg_, fwd_limit, side, tilt_roll_deg_,
+                  1000.0f * tilt_hold_s_);
+    tilt_violating_ = false;
+    return true;
+}
+
+bool State_RLBase::speed_guard()
+{
+    // Running mean-square of each leg joint's speed. Walking stays near 2-5
+    // rad/s RMS; a joint that rings or races goes well above 10.
+    const auto now = std::chrono::steady_clock::now();
+    const float dt = std::clamp(std::chrono::duration<float>(now - speed_last_tp_).count(), 0.0f, 0.02f);
+    speed_last_tp_ = now;
+    const auto & jmap = env->robot->data.joint_ids_map;
+    const float a = dt / speed_tau_s_;
+    for (size_t i = 0; i < speed_ms_.size(); ++i) {
+        const float dq = lowstate->msg_.motor_state()[(int)jmap[i]].dq();
+        speed_ms_[i] += a * (dq * dq - speed_ms_[i]);
+        if (speed_ms_[i] > speed_rms_limit_ * speed_rms_limit_) {
+            spdlog::error("Safety: leg joint {} speed RMS {:.1f} rad/s > {:.1f} -> Passive",
+                          i, std::sqrt(speed_ms_[i]), speed_rms_limit_);
+            speed_ms_[i] = 0.0f;
+            return true;
+        }
+    }
+    return false;
 }
 
 bool State_RLBase::action_runaway()
@@ -161,7 +264,14 @@ void State_RLBase::run()
         const int motor = (int)jmap[i];
         if (i < n_lower) {
             // Lower body: RL policy.
-            lowcmd->msg_.motor_cmd()[motor].q() = action[i];
+            // Soft start: blend from the pose at entry to the policy's target.
+            // Before the first policy step the target is the entry pose itself.
+            float alpha = 0.0f;
+            if (policy_ready_) {
+                const float t = std::chrono::duration<float>(now - enter_tp_).count();
+                alpha = soft_start_s_ > 0.0f ? std::clamp(t / soft_start_s_, 0.0f, 1.0f) : 1.0f;
+            }
+            lowcmd->msg_.motor_cmd()[motor].q() = q_entry_[i] + alpha * (action[i] - q_entry_[i]);
             continue;
         }
         // Arm joint: follow IL target when live, else the button-selected pose

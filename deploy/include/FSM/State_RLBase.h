@@ -5,6 +5,7 @@
 
 #include <vector>
 #include <chrono>
+#include <atomic>
 
 #include "FSMState.h"
 #include "isaaclab/envs/mdp/actions/joint_actions.h"
@@ -18,6 +19,7 @@ public:
     void enter()
     {
         guard_violating_ = false;
+        begin_safety();
 
         // set gain
         for (int i = 0; i < env->robot->data.joint_stiffness.size(); ++i)
@@ -44,6 +46,7 @@ public:
             while (policy_thread_running)
             {
                 env->step();
+                policy_ready_ = true;
 
                 // Sleep
                 std::this_thread::sleep_until(sleepTill);
@@ -93,6 +96,32 @@ private:
     float guard_hold_s_ = 0.06f;
     bool guard_violating_ = false;
     std::chrono::steady_clock::time_point guard_since_;
+
+    // Further guards, all -> Passive (damping), all overridable from
+    // deploy.yaml `safety:` (see the constructor in State_RLBase.cpp).
+    void begin_safety();   // called on entering the state
+    bool tilt_guard();     // pelvis tilted beyond what the policy is trained for
+    bool speed_guard();    // a leg joint is shaking or racing
+    bool start_refused();  // the robot was not upright when the policy was started
+    float tilt_roll_deg_ = 40.0f;         // sideways
+    float tilt_back_deg_ = 35.0f;         // backward
+    float tilt_fwd_deg_ = 50.0f;          // forward (deep squats lean ~30 deg)
+    float tilt_lean_margin_deg_ = 25.0f;  // forward allowance beyond the commanded lean
+    float tilt_hold_s_ = 0.10f;
+    bool tilt_violating_ = false;
+    std::chrono::steady_clock::time_point tilt_since_;
+    float speed_rms_limit_ = 10.0f;       // rad/s, running RMS of each leg joint
+    float speed_tau_s_ = 0.20f;           // averaging time of that RMS
+    std::vector<float> speed_ms_;
+    std::chrono::steady_clock::time_point speed_last_tp_;
+    float start_max_tilt_deg_ = 20.0f;
+    bool start_refused_ = false;
+    // Soft start: the leg targets blend from the pose the robot is in when the
+    // policy starts to the policy's own targets over soft_start_s_.
+    float soft_start_s_ = 0.5f;
+    std::vector<float> q_entry_;
+    std::chrono::steady_clock::time_point enter_tp_;
+    std::atomic<bool> policy_ready_{false};
 };
 
 REGISTER_FSM(State_RLBase)

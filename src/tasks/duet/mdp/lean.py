@@ -50,7 +50,7 @@ class LeanCommandCfg(CommandTermCfg):
   min_lean: float = 0.25
   lean_fraction: float = 0.4
   """Share of command draws that ask for a lean; the rest ask for none."""
-  rate: float = 0.8
+  rate: float = 0.4
   """How fast the commanded value moves toward its target, rad/s."""
   stoop_height_range: tuple[float, float] = (0.42, 0.62)
   """Pelvis height commands allowed while a lean is asked for, m."""
@@ -118,6 +118,13 @@ class LeanCommand(CommandTerm):
       height._squat_target[ids] = height._squat_target[ids].clamp(lo, hi)
       still = ids[standing[ids]]
       height._height[still] = height._squat_target[still]
+    # A lean that is being ramped out keeps the robot in the stoop band until it
+    # is nearly gone: straighten first, rise second. (Rising with the torso
+    # still far forward made the robot step forward to catch itself.)
+    out = ((self.target <= 0.0) & (self._value[:, 0] > 0.1) & standing).nonzero(as_tuple=False).flatten()
+    if len(out):
+      lo, hi = self.stoop_floor, self.cfg.stoop_height_range[1]
+      height._height[out] = height._height[out].clamp(lo, hi)
 
   def _update_metrics(self) -> None:
     pass

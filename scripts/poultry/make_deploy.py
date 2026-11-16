@@ -8,6 +8,11 @@
   GAIT_PERIOD stride period the checkpoint was trained with, s (default: the
               task's current value; checkpoints up to 19,500 used 0.85)
 
+FIRST_TEST=1 in the environment narrows the command limits for a first run on
+hardware: 0.4 m/s forward, 0.3 back, 0.2 sideways, 0.5 rad/s turn, no squat
+below 0.60 m, lean button limited to 0.8 rad. The safety guards are written
+into every deploy.yaml either way (see SAFETY below).
+
 Writes exported/policy.onnx (with the training contract in its metadata),
 exported/checkpoint.json and params/deploy.yaml. Gains, action scale, default
 pose and observation layout are read from the training environment, and the
@@ -55,6 +60,22 @@ TARGET_CLIP = [
   [-3.33, 3.11], [-3.29, 0.86], [-2.98, 2.98], [-0.74, 3.33], [-2.02, 1.97], [-0.95, 0.99],
   [-2.86, 2.86],
 ]
+# Guards in the controller (State_RLBase): each drops to Passive (damping).
+SAFETY = {
+  "max_abs_action": 15.0,        # raw policy output above this ...
+  "max_abs_action_hold_s": 0.06,  # ... for this long
+  "tilt_roll_deg": 40.0,         # pelvis tilted sideways
+  "tilt_back_deg": 35.0,         # backward
+  "tilt_forward_deg": 50.0,      # forward (a deep squat leans about 30 deg)
+  "tilt_lean_margin_deg": 25.0,  # forward allowance beyond the commanded lean
+  "tilt_hold_s": 0.10,
+  "joint_speed_rms": 10.0,       # rad/s running RMS of any leg joint (walking is 2-5)
+  "start_max_tilt_deg": 20.0,    # the policy is not started on a robot tilted more than this
+  "soft_start_s": 0.5,           # leg targets blend in over this time when the policy starts
+}
+# Narrow command limits for the first runs on hardware (FIRST_TEST=1).
+FIRST_TEST = {"lin_vel_x": [-0.3, 0.4], "lin_vel_y": [-0.2, 0.2], "ang_vel_z": [-0.5, 0.5],
+              "height_floor": 0.60, "lean": 0.8}
 # Training observation term -> (controller term, extra fields).
 OBS = {
   "base_ang_vel": ("base_ang_vel", {}),
@@ -148,7 +169,7 @@ def main() -> int:
     "stiffness": meta["joint_stiffness"],
     "damping": meta["joint_damping"],
     "default_joint_pos": meta["default_joint_pos"],
-    "safety": {"max_abs_action": 15.0, "max_abs_action_hold_s": 0.06},
+    "safety": dict(SAFETY),
     "commands": {
       "base_velocity": {
         "ranges": {
@@ -188,6 +209,14 @@ def main() -> int:
       "height_range": [stoop_lo, float(lean_term.cfg.stoop_height_range[1])],
       "height": max(stoop_lo, 0.36),  # pelvis height held while leaning (D-pad Up/Down adjusts)
     }
+  if os.environ.get("FIRST_TEST"):
+    r = deploy["commands"]["base_velocity"]["ranges"]
+    for axis in ("lin_vel_x", "lin_vel_y", "ang_vel_z"):
+      r[axis] = [max(r[axis][0], FIRST_TEST[axis][0]), min(r[axis][1], FIRST_TEST[axis][1])]
+    bh_cfg = deploy["commands"]["base_height"]
+    bh_cfg["range"][0] = max(bh_cfg["range"][0], FIRST_TEST["height_floor"])
+    if "lean" in deploy["commands"]:
+      deploy["commands"]["lean"]["pick"] = min(deploy["commands"]["lean"]["pick"], FIRST_TEST["lean"])
   header = (
     f"# PoultrySurface {run_dir.name}/{ckpt_name} (iteration {iteration}).\n"
     f"# {P.HISTORY} frames per observation term: {meta['obs_dim']} inputs, {n_act} actions. "

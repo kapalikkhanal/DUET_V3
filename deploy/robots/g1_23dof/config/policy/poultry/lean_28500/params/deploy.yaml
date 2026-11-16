@@ -10,7 +10,9 @@ damping: [2.0, 2.0, 2.0, 4.0, 2.0, 2.0, 2.0, 2.0, 2.0, 4.0, 2.0, 2.0, 5.0, 3.0, 
   3.0, 3.0, 3.0, 3.0]
 default_joint_pos: [-0.1, 0.0, 0.0, 0.3, -0.2, 0.0, -0.1, 0.0, 0.0, 0.3, -0.2, 0.0, 0.0, 0.35, 0.18, 0.0,
   0.87, 0.0, 0.35, -0.18, 0.0, 0.87, 0.0]
-safety: {max_abs_action: 15.0, max_abs_action_hold_s: 0.06}
+safety: {max_abs_action: 15.0, max_abs_action_hold_s: 0.06, tilt_roll_deg: 40.0, tilt_back_deg: 35.0,
+  tilt_forward_deg: 50.0, tilt_lean_margin_deg: 25.0, tilt_hold_s: 0.1, joint_speed_rms: 10.0, start_max_tilt_deg: 20.0,
+  soft_start_s: 0.5}
 commands:
   base_velocity:
     ranges:
@@ -26,7 +28,7 @@ commands:
   lean:
     max: 1.25
     pick: 1.25
-    rate: 0.8
+    rate: 0.4
     settle: 1.0
     height_range: [0.42, 0.62]
     height: 0.42

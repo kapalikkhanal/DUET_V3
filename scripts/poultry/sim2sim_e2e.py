@@ -67,6 +67,9 @@ ap.add_argument("--ctrl", default=None, help="path to g1_ctrl; started with --ne
 ap.add_argument("--scene", default=str(SIM_DIR / config.ROBOT_SCENE))
 ap.add_argument("--keep-band", action="store_true")
 ap.add_argument("--viewer", action="store_true", help="open the MuJoCo window")
+ap.add_argument("--shove", type=float, default=None, metavar="T",
+                help="at T seconds push the torso forward with 500 N for 0.4 s (to see the controller's "
+                     "safety guards act; the robot is meant to fall)")
 ap.add_argument("--save", default=None, help="write the per-step motion log (npz) here")
 ap.add_argument("--lean-test", action="store_true",
                 help="instead of the standard sequence: stand, press X (lean down to the pick pose), "
@@ -206,8 +209,28 @@ if not a.manual:
 viewer = None
 if a.viewer:
   import mujoco.viewer
-  viewer = mujoco.viewer.launch_passive(m, d, key_callback=band.MujuocoKeyCallback)
-next_sync = 0.0
+
+  # The window shows a COPY of the state, refreshed by its own thread. Drawing
+  # can be slow (for example while the GPU is busy training); if the physics
+  # loop waited for it, the simulator would fall out of step with the
+  # controller and the gait would look uneven.
+  d_view = mujoco.MjData(m)
+  viewer = mujoco.viewer.launch_passive(m, d_view, key_callback=band.MujuocoKeyCallback)
+
+  stop_draw = threading.Event()
+
+  def _draw():
+    while viewer.is_running() and not stop_draw.is_set():
+      d_view.qpos[:] = d.qpos
+      d_view.qvel[:] = d.qvel
+      d_view.time = d.time
+      mujoco.mj_forward(m, d_view)
+      viewer.sync()
+      time.sleep(0.03)
+
+  draw_thread = threading.Thread(target=_draw, daemon=True)
+  draw_thread.start()
+behind_total, behind_warned = 0.0, 0.0
 
 from unitree_sdk2py.core.channel import ChannelSubscriber  # noqa: E402
 from unitree_sdk2py.idl.unitree_hg.msg.dds_ import LowCmd_  # noqa: E402
@@ -238,6 +261,10 @@ while ((t := time.monotonic() - t0) < END or a.manual) and (viewer is None or vi
   if not a.manual:
     band.enable = a.keep_band or t < a.release_at
   d.xfrc_applied[torso, :3] = band.Advance(d.qpos[:3], d.qvel[:3]) if band.enable else 0.0
+  if a.shove is not None and a.shove <= t < a.shove + 0.4:
+    yaw_now = 2 * np.arctan2(d.qpos[6], d.qpos[3])
+    d.xfrc_applied[torso, 0] += 500.0 * np.cos(yaw_now)
+    d.xfrc_applied[torso, 1] += 500.0 * np.sin(yaw_now)
   cmd = None
   if not a.stock_bridge and latest["msg"] is not None:
     mc = latest["msg"].motor_cmd
@@ -268,12 +295,23 @@ while ((t := time.monotonic() - t0) < END or a.manual) and (viewer is None or vi
     if d.qpos[2] < 0.35 and not fell:
       fell = True
       print("      ^ pelvis below 0.35 m: FELL")
-  if viewer is not None and t >= next_sync:
-    viewer.sync()
-    next_sync = t + 0.03
   lag = sim_t - (time.monotonic() - t0)
   if lag > 0:
     time.sleep(lag)
+  elif lag < -0.02:
+    # The computer could not keep up. Do not race to catch up (a burst of
+    # physics steps is worse for the controller than a short slow-down).
+    t0 -= lag
+    behind_total -= lag
+    if t - behind_warned > 2.0:
+      behind_warned = t
+      print(f"      ! simulator fell behind real time ({1000 * behind_total:.0f} ms lost so far): "
+            "what you see right now is NOT the policy's own timing")
+      sys.stdout.flush()
+if viewer is not None:
+  stop_draw.set()
+  draw_thread.join(timeout=2.0)
+  viewer.close()
 if len(latest["stamps"]) > 10:
   gaps = np.diff(np.array(latest["stamps"])) * 1000
   print(f"command messages: {(8 if not a.stock_bridge else 1) * len(gaps) / (latest['stamps'][-1] - latest['stamps'][0]):.0f} per second; "
@@ -321,7 +359,12 @@ if GAIT:
     print(f"{label:>13} | {dist / tt[-1]:9.2f} | {1 / per.mean():7.2f} | {100 * per.std() / per.mean():15.0f}% | "
           f"{np.mean(swing[0]):.2f} / {np.mean(swing[1]):.2f}   | {100 * amp(det(lat)):7.1f} | {amp(g[:, 4]):8.1f} | {amp(g[:, 5]):9.1f} | "
           f"{amp(det(np.degrees(yaw))):18.1f} | {np.degrees(yaw[-1] - yaw[0]) / tt[-1]:+.1f}")
-print(f"real-time factor {sim_t / (time.monotonic() - t0):.2f}")
+print(f"real-time factor {sim_t / (time.monotonic() - t0):.2f}" + (f"; fell behind by {1000 * behind_total:.0f} ms in total" if behind_total else ""))
+if ctrl:
+  guard_lines = [ln.split("] ", 2)[-1].strip() for ln in open("/tmp/g1_ctrl_e2e.log") if "Safety:" in ln or "RL guard:" in ln or "Change state" in ln]
+  print("controller log:")
+  for ln in guard_lines:
+    print("   " + ln)
 if ctrl:
   ctrl.terminate()
   ctrl.wait(timeout=5)

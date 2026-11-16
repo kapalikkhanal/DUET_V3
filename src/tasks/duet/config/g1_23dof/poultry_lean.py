@@ -25,19 +25,25 @@ from src.tasks.duet.mdp import lean
 
 from .poultry_surface import unitree_g1_23dof_duet_poultry_surface_env_cfg
 
-# Largest lean, rad (77 deg), and the pelvis heights commanded with a lean, m.
-# Measured at iteration 28,500 (lean then up to 72 deg, heights 0.42-0.62): the
-# lean is tracked to 65-68 deg with no falls, but at a 0.43 m pelvis the
-# shoulder is still 55 cm up and the fingertips stop 12 cm above the floor.
-# The shoulder sits 0.30 m from the pelvis and the wrist 0.29 m below the
-# shoulder, so the hands touch down near a 0.34 m pelvis at 75 deg. Hence the
-# lower heights and the slightly larger lean.
-LEAN_MAX = 1.35
+# Largest lean, rad (72 deg), and the pelvis heights commanded with a lean, m.
+# First fine-tune (laptop, from 26,500, lean to 72 deg at heights 0.42-0.62):
+# the lean was tracked to 65-68 deg with no falls, also through the real
+# controller, but at a 0.43 m pelvis the shoulder is still 55 cm up and the
+# fingertips stop 12 cm above the floor. The shoulder sits 0.30 m from the
+# pelvis and the wrist 0.29 m below the shoulder, so the hands touch down near
+# a 0.34 m pelvis at 70 deg. So the heights go lower; the lean itself is NOT
+# pushed further (the robot works on loose litter and must not tip forward).
+LEAN_MAX = 1.25
 STOOP_HEIGHT = (0.32, 0.62)
-# Schedules in iterations, which continue from the PoultrySurface checkpoint
-# the fine-tune starts from (26,500): the lean opens first, then the heights.
-LEAN_STAGES = ((26_500, 0.35), (28_500, 1.25), (29_500, LEAN_MAX))
-STOOP_FLOOR_STAGES = ((28_500, 0.42), (29_500, STOOP_HEIGHT[0]))
+# Commanded lean moves at this rate, rad/s (72 deg in about 3 s). 0.8 looked
+# too quick on the robot model.
+LEAN_RATE = 0.4
+# The fine-tune starts from this PoultrySurface iteration (iteration counts
+# continue from the checkpoint). The lean opens over 2,000 iterations, then the
+# lower heights over 1,000 more.
+LEAN_START_ITER = 32_000
+LEAN_STAGES = ((LEAN_START_ITER, 0.35), (LEAN_START_ITER + 2_000, LEAN_MAX))
+STOOP_FLOOR_STAGES = ((LEAN_START_ITER + 2_000, 0.42), (LEAN_START_ITER + 3_000, STOOP_HEIGHT[0]))
 
 
 def unitree_g1_23dof_duet_poultry_lean_env_cfg(play=False):
@@ -49,6 +55,7 @@ def unitree_g1_23dof_duet_poultry_lean_env_cfg(play=False):
   cfg.commands[lean.LEAN] = lean.LeanCommandCfg(
     resampling_time_range=(4.0, 10.0),
     max_lean_stages=((0, LEAN_MAX),) if play else tuple((i * ITER, v) for i, v in LEAN_STAGES),
+    rate=LEAN_RATE,
     stoop_height_range=STOOP_HEIGHT,
     stoop_floor_stages=None if play else tuple((i * ITER, v) for i, v in STOOP_FLOOR_STAGES),
   )
