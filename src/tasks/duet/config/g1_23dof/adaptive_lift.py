@@ -17,21 +17,27 @@ from mjlab.managers.scene_entity_config import SceneEntityCfg
 from ...duet_env_cfg import ITER
 from ...mdp import adaptive_lift as lift
 from ...mdp import settle
-from ...mdp.lift_terrain import LiftTile
+from ...mdp.lift_terrain import LiftTile, SplitTile
 from .env_cfgs import LOWER_BODY_ACTUATORS
 from .poultry_lean import LEAN_MAX, STOOP_HEIGHT, unitree_g1_23dof_duet_poultry_lean_env_cfg
 from .poultry_surface import LIFT_WEIGHT_STAGES, poultry_surface_ppo_runner_cfg
 
 TASK = "Adaptive_Lift"
-# Litter columns, replacing the 47k flat (0.15) and soft_floor (0.60) columns.
-# With 20 columns: rigid 3, compacted 4, loose 5, mixed 3; the remaining 5 are
-# the 47k heightfield columns (slope 1, inverted slope 1, rough 1, waves 2).
-TILE_PROPORTIONS = {"rigid": .15, "compacted": .20, "loose": .25, "mixed": .15}
+# Litter and split-level columns, replacing the 47k flat (0.15) and soft_floor
+# (0.60) columns. With 20 columns: rigid 3, compacted 4, loose 4, mixed 2,
+# split-level 2; the remaining 5 are the 47k heightfield columns (slope 1,
+# inverted slope 1, rough 1, waves 2).
+TILE_PROPORTIONS = {"rigid": .15, "compacted": .20, "loose": .20, "mixed": .10, "split": .10}
 REPLACED_TILES = ("flat", "soft_floor")
 # Deepest loose litter per episode, (iteration, m). Shallow while the walk is
 # learned, then to 8 cm (the terrain_v1 deep litter) by 4,000, as the 47k's
 # 2 -> 6 cm ramp. Each episode draws uniformly from 2 cm to this depth.
 LOOSE_DEPTH_STAGES = ((0, .03), (1_500, .03), (4_000, .08))
+# Give way to strong sustained pushes and pulls (mdp.adaptive_lift.PullForceCfg).
+# Off: the stand-still terms and the 47k behaviour (resist) are unchanged.
+PULL_COMPLIANCE = True
+# Pull magnitude as a fraction of 80 N: none while the walk is learned.
+PULL_SCALE_STAGES = ((0, 0.), (2_000, 0.), (6_000, 1.))
 
 
 def env_cfg(play=False):
@@ -58,7 +64,9 @@ def env_cfg(play=False):
     max_layer_height=LOOSE_DEPTH_STAGES[-1][1], litter_depth_range=(0., deepest))
   generator = cfg.scene.terrain.terrain_generator
   tiles = {name: LiftTile(kind=i, proportion=TILE_PROPORTIONS[name])
-           for i, name in enumerate(TILE_PROPORTIONS)}
+           for i, name in enumerate(TILE_PROPORTIONS) if name != "split"}
+  # Split-level paths: 0.6 m strips, step 2 cm at terrain row 0 to 7 cm at row 9.
+  tiles["split"] = SplitTile(proportion=TILE_PROPORTIONS["split"], levels=generator.num_rows)
   kept = {name: sub for name, sub in generator.sub_terrains.items() if name not in REPLACED_TILES}
   cfg.scene.terrain.terrain_generator = replace(generator, sub_terrains={**tiles, **kept})
   if not play:
@@ -102,9 +110,30 @@ def env_cfg(play=False):
   cfg.metrics["leg_power_w"] = MetricsTermCfg(func=lift.leg_power_w)
   cfg.metrics["swing_error_sum_m"] = MetricsTermCfg(func=lift.swing_error_sum_m)
   cfg.metrics["completed_swings"] = MetricsTermCfg(func=lift.swing_count)
+  cfg.metrics["level_swings"] = MetricsTermCfg(func=lift.level_swing_count)
   cfg.metrics["heel_first_landings"] = MetricsTermCfg(func=lift.heel_first_count)
   cfg.metrics["landing_pitch_sum_deg"] = MetricsTermCfg(func=lift.landing_pitch_sum_deg)
+  if PULL_COMPLIANCE:
+    _add_pull_compliance(cfg, play)
   return cfg
+
+
+def _add_pull_compliance(cfg, play):
+  cfg.actions["pull_force"] = lift.PullForceCfg(entity_name="robot")
+  for name, func in (("idle_position_anchor", lift.idle_position_anchor_pull),
+                     ("idle_feet_still", lift.idle_feet_still_pull),
+                     ("idle_base_motion", lift.idle_base_motion_pull),
+                     ("stand_feet_square", lift.stand_feet_square_pull)):
+    old = cfg.rewards[name]
+    if old.func is not func.base:
+      raise TypeError(f"{name}: expected {func.base.__name__}, found {old.func.__name__}")
+    cfg.rewards[name] = RewardTermCfg(func=func, weight=old.weight, params=dict(old.params))
+  cfg.observations["critic"].terms["pull_state"] = ObservationTermCfg(func=lift.pull_state)
+  if not play:
+    cfg.curriculum["pull_scale"] = CurriculumTermCfg(
+      func=lift.pull_scale_schedule, params={"stages": tuple((i * ITER, f) for i, f in PULL_SCALE_STAGES)})
+  cfg.metrics["pull_force_n"] = MetricsTermCfg(func=lift.pull_force_n)
+  cfg.metrics["pull_released"] = MetricsTermCfg(func=lift.pull_released_fraction)
 
 
 def runner_cfg():

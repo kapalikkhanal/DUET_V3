@@ -12,7 +12,8 @@ from src.tasks.common.mdp.symmetry import _TERM_RULES
 from src.tasks.duet.config.g1_23dof.adaptive_lift import LOOSE_DEPTH_STAGES, TASK, TILE_PROPORTIONS
 from src.tasks.duet.duet_env_cfg import ITER
 from src.tasks.duet.mdp import adaptive_lift as lift
-from src.tasks.duet.mdp.lift_terrain import LAYOUT, MATERIALS, LiftTile, column_kinds, material_at
+from src.tasks.duet.mdp.lift_terrain import (LAYOUT, MATERIALS, LiftTile, SplitTile, column_kinds, material_at,
+                                             split_heights, split_offset)
 from src.tasks.duet.mdp.poultry_surface import litter_wrench, point_kinematics
 
 BASE = "Unitree-G1-23Dof-Duet-PoultrySurface-Lean"
@@ -53,11 +54,11 @@ class AdaptiveLiftTests(unittest.TestCase):
   def test_column_layout_and_spatial_materials(self):
     generator = load_env_cfg(TASK).scene.terrain.terrain_generator
     kinds = column_kinds(generator)
-    self.assertEqual(kinds, [0] * 3 + [1] * 4 + [2] * 5 + [3] * 3 + [-1] * 5)
+    self.assertEqual(kinds, [0] * 3 + [1] * 4 + [2] * 4 + [3] * 2 + [4] * 2 + [-1] * 5)
     terrain = NS(size=generator.size, num_rows=generator.num_rows, num_cols=generator.num_cols)
     col_y = lambda c: (c - 10 + .5) * 8.  # noqa: E731  column centre
-    points = torch.tensor([[0., col_y(0)], [0., col_y(4)], [0., col_y(8)], [-7., col_y(12) - 2.],
-                           [-1., col_y(12) + 2.], [0., col_y(16)], [0., 90.]])
+    points = torch.tensor([[0., col_y(0)], [0., col_y(4)], [0., col_y(8)], [-7., col_y(11) - 2.],
+                           [-1., col_y(11) + 2.], [0., col_y(16)], [0., 90.]])
     material, valid = material_at(points, terrain, torch.as_tensor(LAYOUT), torch.tensor(kinds))
     # Mixed tile: x cell 0 / y cell 0 is rigid; x cell 3 / y cell 1 is loose.
     self.assertEqual(material.tolist(), [0, 1, 2, 0, 2, 0, 0])
@@ -89,6 +90,72 @@ class AdaptiveLiftTests(unittest.TestCase):
           self.assertEqual(model.geom_priority[geom[0]], 2)
           self.assertAlmostEqual(model.geom_solref[geom[0], 0], .05)
           self.assertAlmostEqual(model.geom_solimp[geom[0], 0], .6)
+
+  def test_split_level_heights_match_compiled_strips(self):
+    generator = load_env_cfg(TASK).scene.terrain.terrain_generator
+    heights, widths = split_heights(generator)
+    split_cols = [c for c, k in enumerate(column_kinds(generator)) if k == 4]
+    self.assertEqual(len(split_cols), 2)
+    self.assertAlmostEqual(heights[0, split_cols[0]], .02)
+    self.assertAlmostEqual(heights[-1, split_cols[0]], .07, places=6)
+    self.assertTrue((np.diff(heights[:, split_cols[0]]) > 0).all())
+    self.assertTrue((heights[:, [c for c in range(generator.num_cols) if c not in split_cols]] == 0).all())
+    terrain = NS(size=generator.size, num_rows=generator.num_rows, num_cols=generator.num_cols)
+    tile = SplitTile(proportion=1., size=generator.size, levels=generator.num_rows)
+    n, width = tile.strips()
+    self.assertAlmostEqual(width, widths[split_cols[0]])
+    for row in (0, 5, 9):
+      spec = mujoco.MjSpec()
+      spec.worldbody.add_body(name="terrain")
+      origin = tile.function((row + .5) / generator.num_rows, spec, np.random.default_rng(0)).origin
+      model = spec.compile()
+      data = mujoco.MjData(model)
+      mujoco.mj_forward(model, data)
+      self.assertEqual(origin[2], 0.)  # spawn on a low strip
+      local = np.array([(2., (k + .5) * width) for k in range(n)])
+      tops = [1. - mujoco.mj_ray(model, data, np.array([x, y, 1.]), np.array([0., 0., -1.]), None, True, -1,
+                                 np.empty(1, dtype=np.int32)) for x, y in local]
+      offset = np.array([(row - generator.num_rows / 2) * 8., (split_cols[0] - generator.num_cols / 2) * 8.])
+      analytic = split_offset(torch.tensor(local + offset, dtype=torch.float32), terrain,
+                              torch.as_tensor(heights), torch.as_tensor(widths))
+      np.testing.assert_allclose(analytic.numpy(), tops, atol=1e-5)
+      self.assertTrue(set(np.round(tops, 5)) == {0., round(float(heights[row, split_cols[0]]), 5)})
+
+  def test_pull_schedule_release_and_anchor(self):
+    cfg = lift.PullForceCfg(entity_name="robot", max_force=80., duration_range=(1., 1.), gap_range=(.1, .1))
+    term = object.__new__(lift.PullForce)
+    term.cfg = cfg
+    term._env = NS(step_dt=.02, num_envs=4, device="cpu")
+    term.scale = 1.
+    term.body_ids = [0, 1]
+    for name, value in (("target", torch.zeros(4, 3)), ("force", torch.zeros(4, 3)),
+                        ("body", torch.zeros(4, dtype=torch.long)), ("elapsed", torch.zeros(4)),
+                        ("duration", torch.zeros(4)), ("gap", torch.full((4,), .1)),
+                        ("pulling", torch.zeros(4, dtype=torch.bool)), ("since_strong", torch.full((4,), 1e3)),
+                        ("wrench", torch.zeros(4, 2, 3))):
+      setattr(term, name, value)
+    torch.manual_seed(0)
+    peak, released, wrench_ok = torch.zeros(4), [], True
+    for _ in range(150):  # 3 s: gap, a 1 s pull, settle
+      term.process_actions(None)
+      peak = torch.maximum(peak, term.force.norm(dim=-1))
+      self.assertTrue((term.force[:, 2] == 0).all())
+      wrench_ok &= bool(torch.allclose(term.wrench.sum(1), term.force))
+      released.append(term.released.clone())
+    self.assertTrue(wrench_ok)
+    self.assertTrue((peak <= 80. + 1e-4).all() and (peak > 0).all())
+    strong = peak > cfg.release_force
+    released = torch.stack(released)
+    # Released through the pull and for about settle_time after it.
+    torch.testing.assert_close(released.any(0), strong)
+    self.assertTrue(((released.sum(0)[strong] * .02) > 1.).all())
+    term.scale = 0.
+    term.pulling[:] = False
+    term.gap[:] = 0.
+    term.since_strong[:] = 1e3
+    term.process_actions(None)
+    self.assertEqual(term.force.abs().sum().item(), 0.)
+    self.assertFalse(term.released.any())
 
   def test_drag_and_command_capped_plow(self):
     pos = torch.tensor([[[0., 0., .12]]])
@@ -131,8 +198,10 @@ class AdaptiveLiftTests(unittest.TestCase):
     surface._env = env
     surface.cfg = NS(period=.75, stance_fraction=.56)
     surface._sample_key = None
-    for field in ("peak", "last_apex", "last_liftoff_angle", "swing_target", "air_pitch"):
+    for field in ("peak", "last_apex", "last_liftoff_angle", "swing_target", "air_pitch",
+                  "swing_bed_lo", "swing_bed_hi"):
       setattr(surface, field, torch.zeros_like(control))
+    surface.last_bed = torch.zeros(1, 2, 14)
     for field in ("was_air", "complete_swing", "has_landed", "previous_contact", "tracking"):
       setattr(surface, field, torch.zeros_like(contact))
     points = torch.zeros(1, 2, 14, 3)
@@ -176,6 +245,17 @@ class AdaptiveLiftTests(unittest.TestCase):
       step(.01, False, 0., -.3)
       self.assertEqual(lift.touchdown_tilt(env).item(), 0)
       self.assertFalse(step(.0, True)["heel_first"].any())
+      # A swing that steps up 5 cm is a completed swing but is not scored for apex.
+      step(.01, False)
+      surface.last_bed[:, :, 7:] = .05
+      step(.10, False)
+      surface.last_bed[:] = .05
+      s = step(.0, True)
+      self.assertTrue(s["tracked_landing"].all() and not s["level_landing"].any())
+      self.assertEqual(lift.swing_apex(env).item(), 0)
+      step(.06, False)
+      self.assertTrue(step(.0, True)["level_landing"].all())
+      surface.last_bed.zero_()
       step(.03, False)
       twist.zero_()
       step(.08, False)
@@ -224,7 +304,14 @@ class AdaptiveLiftTests(unittest.TestCase):
     self.assertEqual(cfg.observations["actor"].history_length, 6)
     self.assertEqual(list(cfg.observations["actor"].terms), [*base.observations["actor"].terms, "clearance_commands"])
     self.assertEqual(list(cfg.observations["critic"].terms),
-                     [*base.observations["critic"].terms, "clearance_commands", "litter_truth"])
+                     [*base.observations["critic"].terms, "clearance_commands", "litter_truth", "pull_state"])
+    # Stand-still terms let go during strong pulls; weights and parameters unchanged.
+    for name in ("idle_position_anchor", "idle_feet_still", "idle_base_motion", "stand_feet_square"):
+      self.assertIs(cfg.rewards[name].func.base, base.rewards[name].func)
+      self.assertEqual((cfg.rewards[name].weight, cfg.rewards[name].params),
+                       (base.rewards[name].weight, base.rewards[name].params))
+    self.assertEqual(cfg.curriculum["pull_scale"].params["stages"][-1][1], 1.)
+    self.assertEqual(_TERM_RULES["pull_state"][1], [1.0, -1.0, 1.0, 1.0])
     for name in ("poultry_clearance", "poultry_swing_height", "poultry_plow", "leg_power",
                  "touchdown_load", "touchdown_tilt"):
       self.assertEqual(cfg.rewards[name].weight, 0.)

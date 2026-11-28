@@ -49,6 +49,8 @@ _TERM_RULES: dict[str, tuple[list[int], list[float]]] = {
   "clearance_commands": ([1, 0], [1.0, 1.0]),
   # [depth L, R, bed L, R, litter-tile L, R, drag strength]
   "litter_truth": ([1, 0, 3, 2, 5, 4, 6], [1.0] * 7),
+  # pelvis-frame pull force (polar vector: y flips) and the release flag
+  "pull_state": ([0, 1, 2, 3], [1.0, -1.0, 1.0, 1.0]),
   "height_command": ([0], [1.0]),
   "lean_command": ([0], [1.0]),  # forward pitch: unchanged by a left-right mirror
 }
