@@ -63,6 +63,30 @@ def main():
     pull = env.action_manager.get_term("pull_force")
     pull_bodies = pull._entity.data.indexing.body_ids[pull.body_ids]
     check_compiled_beds(env, surface)
+    # The swing state machine must only advance in rewards and metrics (before
+    # resets). An observation that calls sample() would consume touchdowns.
+    observe = env.observation_manager.compute
+    def guarded_observe(*args, **kwargs):
+      surface.sample = lambda: (_ for _ in ()).throw(AssertionError("observation called sample()"))
+      try:
+        return observe(*args, **kwargs)
+      finally:
+        del surface.sample
+    env.observation_manager.compute = guarded_observe
+    # Split-level spawns: most robots on those tiles start with the feet on two
+    # levels (7 of 10 spawn points are seams). Counted over five resets.
+    feet_ids = env.scene["robot"].find_sites(("left_foot", "right_foot"), preserve_order=True)[0]
+    on_two = on_split = 0
+    for seed in range(5):
+      env.reset(seed=100 + seed)
+      split_env = surface.col_kind[env.scene.terrain.terrain_types] == SPLIT
+      feet = env.scene["robot"].data.site_pos_w[:, feet_ids]
+      levels = split_offset(feet, surface.terrain_cfg, surface.split_h, surface.split_w)
+      raised = surface.split_h[env.scene.terrain.terrain_levels, env.scene.terrain.terrain_types]
+      on_two += int((((levels[:, 0] - levels[:, 1]).abs() > .5 * raised) & split_env).sum())
+      on_split += int(split_env.sum())
+    assert on_split > 0 and on_two >= .45 * on_split, (on_two, on_split)
+    print(f"Split-level spawns: {on_two}/{on_split} robots start with one foot up.", flush=True)
     for seed in (19, 37):
       obs, _ = env.reset(seed=seed)
       assert obs["actor"].shape == (NUM_ENVS, 444) and obs["critic"].shape == (NUM_ENVS, 297)

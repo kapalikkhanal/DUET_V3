@@ -6,15 +6,15 @@ import torch
 from mjlab.managers.action_manager import ActionTerm, ActionTermCfg
 from mjlab.managers.command_manager import CommandTerm, CommandTermCfg
 from mjlab.tasks.velocity.mdp.velocity_command import UniformVelocityCommand, UniformVelocityCommandCfg
-from mjlab.utils.lab_api.math import matrix_from_quat, quat_apply_inverse
+from mjlab.utils.lab_api.math import matrix_from_quat, quat_apply_inverse, quat_from_euler_xyz
 
 from src.tasks.common.mdp.curriculums import piecewise_linear
-from src.tasks.common.mdp.rewards import idle_base_motion, idle_feet_still
+from src.tasks.common.mdp.rewards import idle_base_motion, idle_feet_still, track_linear_velocity, variable_posture
 
 from . import settle
 from .lean import idle_position_anchor_lean
 
-from .lift_terrain import LAYOUT, LOOSE, MATERIALS, column_kinds, material_at, split_heights, split_offset
+from .lift_terrain import LAYOUT, LOOSE, MATERIALS, SPLIT, column_kinds, material_at, split_heights, split_offset
 from .poultry_surface import PoultrySurfaceAction, PoultrySurfaceActionCfg, litter_wrench, point_kinematics
 
 # A landing counts as heel-first when the sole was this far toe-up just before contact.
@@ -103,6 +103,18 @@ def track_lateral_velocity(env, std, command_name="twist"):
   vy_cmd = env.command_manager.get_command(command_name)[:, 1]
   vy = env.scene["robot"].data.root_link_lin_vel_b[:, 1]
   return torch.exp(-(vy - vy_cmd).square() / std**2)
+
+
+def track_yaw_rate(env, std, xy_std, command_name="twist"):
+  """HOMIE's yaw term exp(-(w_z - w_cmd)^2 / std^2), times the old roll/pitch-rate factor.
+
+  The DUET track_angular_velocity puts the yaw error and 0.05 x the roll/pitch
+  rates in one kernel. Sharpening only the yaw part keeps the roll and pitch
+  factor exactly as in the 47k task: xy_std = 0.707 / sqrt(0.05).
+  """
+  w = env.scene["robot"].data.root_link_ang_vel_b
+  yaw_cmd = env.command_manager.get_command(command_name)[:, 2]
+  return torch.exp(-(w[:, 2] - yaw_cmd).square() / std**2 - w[:, :2].square().sum(-1) / xy_std**2)
 
 
 @dataclass(kw_only=True)
@@ -209,6 +221,34 @@ class LiftSurface(PoultrySurfaceAction):
     return s
 
 
+def face_along_seams(env, env_ids, spread=.4, tolerance=.03):
+  """Reset event after reset_base: a robot spawned on a split-level seam faces along it.
+
+  With the heading within +-spread of the seam (either way), the feet sit on
+  the two levels clear of the edge: one foot up, left or right at random. The
+  flat-patch spawn draws a uniform heading, which straddled only ~30% of the
+  time. Reads the root pose from qpos: xpos is stale until the next forward.
+  """
+  surface = env.action_manager.get_term("poultry_surface")
+  robot = env.scene["robot"]
+  pose = robot.data.data.qpos[env_ids][:, robot.data.indexing.free_joint_q_adr]
+  terrain = surface.terrain_cfg
+  v = pose[:, 1] / terrain.size[1] + terrain.num_cols / 2
+  col = v.floor().long().clamp(0, terrain.num_cols - 1)
+  width = surface.split_w[col]
+  k = (v - v.floor()) * terrain.size[1] / width
+  seam = (surface.col_kind[col] == SPLIT) & ((k - k.round()).abs() * width < tolerance) & (k.round() > 0)
+  ids = env_ids[seam]
+  if not len(ids):
+    return
+  yaw = (torch.rand(len(ids), device=env.device) * 2 - 1) * spread
+  yaw = yaw + math.pi * torch.randint(2, (len(ids),), device=env.device)
+  zero = torch.zeros_like(yaw)
+  pose = pose[seam].clone()
+  pose[:, 3:7] = quat_from_euler_xyz(zero, zero, yaw)
+  robot.write_root_link_pose_to_sim(pose, env_ids=ids)
+
+
 def apex_error(apex, target):
   # Smooth L1 in units of 2 cm, with bounded influence from exceptional swings.
   error = torch.sqrt(1 + ((apex - target) / .02).square()) - 1
@@ -258,12 +298,25 @@ def power_cost(env):
   return (leg_power_w(env) / 100).clamp_max(4)
 
 
-def touchdown_load(env):
+def robot_weight_n(env):
+  """Per-env robot weight including the randomized payloads (nominal 32.1 kg, 315 N)."""
+  ids = env.scene["robot"].data.indexing.body_ids
+  return env.sim.model.body_mass[..., ids].sum(-1) * 9.81
+
+
+def touchdown_load(env, weight_fraction=1., scale_n=150.):
+  """Vertical foot load above body weight in the first 40 ms after a flight.
+
+  The 47k->50k fine-tune used a fixed 320 N, which is body weight only for
+  the bare robot; with up to 5.5 kg of payload it charged every landing for
+  the payload. The threshold now follows each robot's mass.
+  """
   sensor = env.scene["feet_ground_contact"].data
   loading = (sensor.current_contact_time > 0) & (sensor.current_contact_time <= .04 + 1e-6)
   gate = loading & (sensor.last_air_time >= .06) & env.command_manager.get_term("twist_held").moving[:, None]
   peak = sensor.force_history[..., 2].abs().amax(-1)
-  return (((peak - 320) / 150).clamp(0, 4) * gate).sum(-1)
+  threshold = (weight_fraction * robot_weight_n(env)).expand(peak.shape[0]).unsqueeze(-1)
+  return (((peak - threshold) / scale_n).clamp(0, 4) * gate).sum(-1)
 
 
 def touchdown_tilt(env):
@@ -288,11 +341,20 @@ def touchdown_tilt(env):
 
 
 def litter_truth(env):
-  """Critic only: per-foot litter depth, bed elevation, litter-tile flag, drag strength."""
+  """Critic only: per-foot litter depth, bed elevation, litter-tile flag, drag strength.
+
+  Read-only. Observations run after resets, after a forward pass and a
+  sensor refresh, and a reset clears the sample() cache; calling sample()
+  here advanced the swing state machine a second time for every robot, so
+  touchdowns and takeoffs in the last substep were consumed by the
+  observation instead of the rewards (and takeoffs latched the next step's
+  command). This reads the current sole geometry without touching that state.
+  """
   surface = env.action_manager.get_term("poultry_surface")
-  s = surface.sample()
-  return torch.cat((s["layer"].mean(-1) / .08, surface.last_bed.mean(-1) / .012,
-                    s["valid"].float().mean(-1), surface.strength[:, None] / 1000), dim=-1)
+  points, _, _ = surface.world_geometry()
+  bed, depth, valid = surface.substrate(points)
+  return torch.cat((depth.mean(-1) / .08, bed.mean(-1) / .07,
+                    valid.float().mean(-1), surface.strength[:, None] / 1000), dim=-1)
 
 
 def swing_error_sum_m(env):
@@ -334,20 +396,24 @@ class PullForceCfg(ActionTermCfg):
   enough to need a step, and the stand-still terms (position anchor, feet
   still, feet square) made leaning back against a pull cheaper than stepping
   with it. Magnitudes are uniform from 0 to ``max_force`` times the curriculum
-  scale. Light pulls are still resisted; above ``release_force`` and for
-  ``settle_time`` after, the stand-still terms are off and the anchor
-  re-latches where the robot ends up. 80 N at the torso moves the centre of
-  pressure ~0.23 m on a 35 kg robot, past the feet: it has to step.
+  scale. Pulls up to ``release_force`` are resisted as before; above it and
+  for ``settle_time`` after, the stand-still terms are off and the anchor
+  re-latches where the robot ends up. The 40 N threshold sits well above the
+  reaction of moving arms and payloads, so station keeping while the arms
+  work is unchanged. 40 N at the torso moves the centre of pressure ~0.12 m
+  on a 35 kg robot (the toe), 100 N ~0.29 m: it has to step. No pull starts
+  while a lean or a squat below ``min_height`` is commanded.
   """
 
   body_names: tuple[str, ...] = ("torso_link", "pelvis")
-  max_force: float = 80.
+  max_force: float = 100.
   duration_range: tuple[float, float] = (1., 3.)
-  gap_range: tuple[float, float] = (3., 8.)
+  gap_range: tuple[float, float] = (4., 10.)
   ramp_time: float = .25
-  release_force: float = 20.
+  release_force: float = 40.
   settle_time: float = 1.
   initial_scale: float = 0.
+  min_height: float = .55
 
   def build(self, env):
     return PullForce(self, env)
@@ -383,11 +449,21 @@ class PullForce(ActionTerm):
     """Strong pull now, or one ended less than ``settle_time`` ago."""
     return self.since_strong < self.cfg.settle_time
 
+  def allowed(self):
+    """No new pull while leaning or squatting deep (a person does not shove a stooping robot)."""
+    commands = self._env.command_manager
+    ok = torch.ones(self.num_envs, dtype=torch.bool, device=self.device)
+    if "lean" in commands.active_terms:
+      ok &= ~commands.get_term("lean").active
+    if "base_height" in commands.active_terms:
+      ok &= commands.get_command("base_height")[:, 0] >= self.cfg.min_height
+    return ok
+
   def process_actions(self, actions):
     # Once per policy step: advance the pull schedule.
     dt = self._env.step_dt
     self.gap.sub_(dt * ~self.pulling)
-    start = ~self.pulling & (self.gap <= 0)
+    start = ~self.pulling & (self.gap <= 0) & self.allowed()
     ids = start.nonzero(as_tuple=False).flatten()
     if len(ids):
       magnitude = torch.rand(len(ids), device=self.device) * self.cfg.max_force * self.scale
@@ -462,11 +538,50 @@ def stand_feet_square_pull(env, **kwargs):
   return settle.stand_feet_square(env, **kwargs) * ~pull_released(env)
 
 
-# The stand-still terms these replace, checked by the task config.
+class variable_posture_pull(variable_posture):
+  """Posture with walking tolerances while released: a step needs some hip roll.
+
+  The standing tolerance on hip roll/yaw and ankle roll is 0.05 rad, so one
+  sideways step under a pull would otherwise cost ~0.45/s of posture reward.
+  """
+
+  def __call__(self, env, **params):
+    value = super().__call__(env, **params)
+    released = pull_released(env)
+    if not released.any():
+      return value
+    standing = self.std_standing
+    self.std_standing = self.std_walking
+    try:
+      walking = super().__call__(env, **params)
+    finally:
+      self.std_standing = standing
+    return torch.where(released, walking, value)
+
+
+def _translation_idle(env, command_name):
+  return env.command_manager.get_command(command_name)[:, :2].norm(dim=-1) < .1
+
+
+def track_linear_velocity_pull(env, command_name, **params):
+  """Zero-velocity tracking stops paying for standing still against a strong pull."""
+  value = track_linear_velocity(env, command_name=command_name, **params)
+  return torch.where(pull_released(env) & _translation_idle(env, command_name), 1., value)
+
+
+def track_lateral_velocity_pull(env, std, command_name="twist"):
+  value = track_lateral_velocity(env, std, command_name)
+  return torch.where(pull_released(env) & _translation_idle(env, command_name), 1., value)
+
+
+# The terms these replace, checked by the task config.
 idle_feet_still_pull.base = idle_feet_still
 idle_base_motion_pull.base = idle_base_motion
 stand_feet_square_pull.base = settle.stand_feet_square
 idle_position_anchor_pull.base = idle_position_anchor_lean
+variable_posture_pull.base = variable_posture
+track_linear_velocity_pull.base = track_linear_velocity
+track_lateral_velocity_pull.base = track_lateral_velocity
 
 
 def pull_state(env):

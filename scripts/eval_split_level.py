@@ -74,7 +74,7 @@ cfg.scene.terrain.terrain_generator = replace(
 cfg.scene.terrain.max_init_terrain_level = 0
 cfg.events["reset_base"].func = envs_mdp.reset_root_state_uniform
 cfg.events["reset_base"].params = {"pose_range": {"yaw": (0., 0.)}, "velocity_range": {}}
-for name in ("push_robot", "random_stops", "stop_backward_walkers", "randomize_terrain"):
+for name in ("push_robot", "random_stops", "stop_backward_walkers", "randomize_terrain", "face_along_seams"):
   cfg.events.pop(name, None)
 cfg.curriculum.pop("terrain_levels", None)
 cfg.events["hand_payload"].params["ranges"] = (0.6, 0.6)

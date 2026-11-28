@@ -95,6 +95,10 @@ class SplitTile(LiftTile):
   fixed_height: float | None = None
   # Evaluation: spawn on a seam with the raised strip on +y (+1) or -y (-1).
   seam_side: int = 0
+  # Training spawn points ("spawn" flat patches): most on seams, so robots
+  # start, and often stand, with one foot up; the rest on strip centres.
+  seam_patches: int = 7
+  strip_patches: int = 3
 
   def height(self, row):
     if self.fixed_height is not None:
@@ -122,7 +126,16 @@ class SplitTile(LiftTile):
       origin = (self.size[0] / 2, (low + .5) * width, 0.)
     else:  # seam between this low strip and the raised one on the chosen side
       origin = (self.size[0] / 2, (low + (self.seam_side > 0)) * width, height)
-    return TerrainOutput(origin=np.array(origin), geometries=geometries)
+    # Seams k|k+1 for consecutive k alternate which side is raised. The root is
+    # placed at the raised level; the lower foot settles onto its strip.
+    x = rng.uniform(.3, .7, self.seam_patches + self.strip_patches) * self.size[0]
+    seams = [((low - 2 + k) + 1) * width for k in range(self.seam_patches)]
+    centres = [(low - 1 + k + .5) * width for k in range(self.strip_patches)]
+    patches = [(x[i], y, height) for i, y in enumerate(seams)]
+    patches += [(x[self.seam_patches + i], y, height if (low - 1 + i) % 2 else 0.)
+                for i, y in enumerate(centres)]
+    return TerrainOutput(origin=np.array(origin), geometries=geometries,
+                         flat_patches={"spawn": np.array(patches)})
 
 
 def split_heights(generator):

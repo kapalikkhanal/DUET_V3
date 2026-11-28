@@ -9,6 +9,7 @@ import math
 from dataclasses import replace
 
 from mjlab.managers.curriculum_manager import CurriculumTermCfg
+from mjlab.managers.event_manager import EventTermCfg
 from mjlab.managers.metrics_manager import MetricsTermCfg
 from mjlab.managers.observation_manager import ObservationTermCfg
 from mjlab.managers.reward_manager import RewardTermCfg
@@ -69,6 +70,8 @@ def env_cfg(play=False):
   tiles["split"] = SplitTile(proportion=TILE_PROPORTIONS["split"], levels=generator.num_rows)
   kept = {name: sub for name, sub in generator.sub_terrains.items() if name not in REPLACED_TILES}
   cfg.scene.terrain.terrain_generator = replace(generator, sub_terrains={**tiles, **kept})
+  # Seam spawns face along the seam so they start with one foot up (after reset_base).
+  cfg.events["face_along_seams"] = EventTermCfg(func=lift.face_along_seams, mode="reset")
   if not play:
     cfg.curriculum["litter_depth"].params["stages"] = tuple((i * ITER, d) for i, d in LOOSE_DEPTH_STAGES)
   for sensor in cfg.scene.sensors:
@@ -95,10 +98,13 @@ def env_cfg(play=False):
         params={"reward_name": name, "stages": tuple((i * ITER, f * weight) for i, f in LIFT_WEIGHT_STAGES)})
 
   # Turning and sidestepping, HOMIE's G1 terms: yaw exp(-4 err^2) at 2.0 (was
-  # exp(-2 err^2) at 1.75, nearly flat for small yaw errors) and a separate
-  # lateral term exp(-4 err^2) at 1.0 next to the combined xy term.
-  cfg.rewards["track_angular_velocity"].weight = 2.
-  cfg.rewards["track_angular_velocity"].params["std"] = math.sqrt(.25)
+  # exp(-2 err^2) at 1.75, nearly flat for small yaw errors; the roll/pitch
+  # rate factor inside the term is kept as it was) and a separate lateral
+  # term exp(-4 err^2) at 1.0 next to the combined xy term.
+  old = cfg.rewards["track_angular_velocity"]
+  cfg.rewards["track_angular_velocity"] = RewardTermCfg(
+    func=lift.track_yaw_rate, weight=2.,
+    params={"command_name": old.params["command_name"], "std": math.sqrt(.25), "xy_std": old.params["std"] / math.sqrt(.05)})
   cfg.rewards["track_lateral_velocity"] = RewardTermCfg(
     func=lift.track_lateral_velocity, weight=1., params={"std": math.sqrt(.25)})
 
@@ -123,7 +129,10 @@ def _add_pull_compliance(cfg, play):
   for name, func in (("idle_position_anchor", lift.idle_position_anchor_pull),
                      ("idle_feet_still", lift.idle_feet_still_pull),
                      ("idle_base_motion", lift.idle_base_motion_pull),
-                     ("stand_feet_square", lift.stand_feet_square_pull)):
+                     ("stand_feet_square", lift.stand_feet_square_pull),
+                     ("pose", lift.variable_posture_pull),
+                     ("track_linear_velocity", lift.track_linear_velocity_pull),
+                     ("track_lateral_velocity", lift.track_lateral_velocity_pull)):
     old = cfg.rewards[name]
     if old.func is not func.base:
       raise TypeError(f"{name}: expected {func.base.__name__}, found {old.func.__name__}")

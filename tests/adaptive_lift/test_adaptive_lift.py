@@ -122,10 +122,15 @@ class AdaptiveLiftTests(unittest.TestCase):
       self.assertTrue(set(np.round(tops, 5)) == {0., round(float(heights[row, split_cols[0]]), 5)})
 
   def test_pull_schedule_release_and_anchor(self):
-    cfg = lift.PullForceCfg(entity_name="robot", max_force=80., duration_range=(1., 1.), gap_range=(.1, .1))
+    # One pull per robot in the 3 s window: it starts at 0.1 s, the next gap is 5 s.
+    cfg = lift.PullForceCfg(entity_name="robot", duration_range=(1., 1.), gap_range=(5., 5.))
+    self.assertEqual((cfg.max_force, cfg.release_force), (100., 40.))
     term = object.__new__(lift.PullForce)
     term.cfg = cfg
-    term._env = NS(step_dt=.02, num_envs=4, device="cpu")
+    lean = NS(active=torch.zeros(4, dtype=torch.bool))
+    height = torch.full((4, 1), .78)
+    term._env = NS(step_dt=.02, num_envs=4, device="cpu", command_manager=NS(
+      active_terms=["lean", "base_height"], get_term=lambda _: lean, get_command=lambda _: height))
     term.scale = 1.
     term.body_ids = [0, 1]
     for name, value in (("target", torch.zeros(4, 3)), ("force", torch.zeros(4, 3)),
@@ -143,12 +148,21 @@ class AdaptiveLiftTests(unittest.TestCase):
       wrench_ok &= bool(torch.allclose(term.wrench.sum(1), term.force))
       released.append(term.released.clone())
     self.assertTrue(wrench_ok)
-    self.assertTrue((peak <= 80. + 1e-4).all() and (peak > 0).all())
+    self.assertTrue((peak <= 100. + 1e-4).all() and (peak > 0).all())
     strong = peak > cfg.release_force
     released = torch.stack(released)
     # Released through the pull and for about settle_time after it.
     torch.testing.assert_close(released.any(0), strong)
-    self.assertTrue(((released.sum(0)[strong] * .02) > 1.).all())
+    self.assertTrue(((released.sum(0)[strong] * .02) >= 1. - 1e-6).all())
+    # No pull starts while a lean or a deep squat is commanded.
+    term.pulling[:] = False
+    term.gap[:] = 0.
+    lean.active[:2] = True
+    height[2:] = .40
+    term.process_actions(None)
+    self.assertFalse(term.pulling.any())
+    lean.active[:] = False
+    height[:] = .78
     term.scale = 0.
     term.pulling[:] = False
     term.gap[:] = 0.
@@ -272,6 +286,35 @@ class AdaptiveLiftTests(unittest.TestCase):
     torch.testing.assert_close(lift.track_lateral_velocity(env, std=.5),
                                torch.tensor([1., math.exp(-1.)]))
 
+  def test_touchdown_load_follows_robot_weight(self):
+    # Two robots, bare (32.1 kg) and with 5.5 kg payload, both landing at 1.1 x their own weight.
+    mass = torch.tensor([[32.1], [37.6]])
+    peak = (1.1 * mass * 9.81).expand(2, 2)
+    sensor = NS(current_contact_time=torch.full((2, 2), .02), last_air_time=torch.full((2, 2), .2),
+                force_history=torch.stack((torch.zeros(2, 2, 4), torch.zeros(2, 2, 4), peak[..., None].expand(2, 2, 4)), -1))
+    env = NS(scene={"feet_ground_contact": NS(data=sensor), "robot": NS(data=NS(indexing=NS(body_ids=torch.tensor([0]))))},
+             sim=NS(model=NS(body_mass=mass)),
+             command_manager=NS(get_term=lambda _: NS(moving=torch.ones(2, dtype=torch.bool))))
+    cost = lift.touchdown_load(env)
+    torch.testing.assert_close(cost, 2 * .1 * mass[:, 0] * 9.81 / 150)
+    sensor.force_history[..., 2] = mass[:, :, None] * 9.81 * .99  # below body weight: free
+    self.assertEqual(lift.touchdown_load(env).abs().sum().item(), 0.)
+
+  def test_yaw_tracking_keeps_roll_pitch_factor(self):
+    from src.tasks.common.mdp.rewards import track_angular_velocity
+    w = torch.tensor([[.3, -.2, .5], [0., 0., .1]])
+    command = torch.tensor([[0., 0., .2], [0., 0., .1]])
+    env = NS(command_manager=NS(get_command=lambda _: command),
+             scene={"robot": NS(data=NS(root_link_ang_vel_b=w))})
+    old = track_angular_velocity(env, std=math.sqrt(.5), command_name="twist")
+    new = lift.track_yaw_rate(env, std=.5, xy_std=math.sqrt(.5) / math.sqrt(.05))
+    xy = w[:, :2].square().sum(-1)
+    # Same roll/pitch factor as the 47k term; yaw kernel exp(-4 e^2) instead of exp(-2 e^2).
+    torch.testing.assert_close(new / old, torch.exp(-4 * (w[:, 2] - command[:, 2]) ** 2)
+                               / torch.exp(-2 * (w[:, 2] - command[:, 2]) ** 2))
+    torch.testing.assert_close(new[1], torch.tensor(1.))
+    self.assertGreater(xy[0].item(), 0)
+
   def test_registered_scratch_contract(self):
     cfg = load_env_cfg(TASK)
     base = load_env_cfg(BASE)
@@ -281,8 +324,13 @@ class AdaptiveLiftTests(unittest.TestCase):
     self.assertEqual(cfg.commands["base_height"].floor_stages[-1][1], .22)
     self.assertEqual(cfg.commands["lean"].max_lean_stages[0][1], 0.)
     self.assertEqual(cfg.commands["lean"].max_lean_stages[-1][1], 1.25)
-    # Every event (spawn, friction, pushes, payloads, delays, gains) is the 47k task's.
-    self.assertEqual(cfg.events, base.events)
+    # Every event (spawn, friction, pushes, payloads, delays, gains) is the 47k task's,
+    # plus turning seam spawns along the seam, after reset_base.
+    events = dict(cfg.events)
+    self.assertIs(events.pop("face_along_seams").func, lift.face_along_seams)
+    self.assertEqual(events, base.events)
+    names = list(cfg.events)
+    self.assertGreater(names.index("face_along_seams"), names.index("reset_base"))
     for key in ("terrain_levels", "command_vel"):
       self.assertEqual(cfg.curriculum[key], base.curriculum[key])
     surface, old = cfg.actions["poultry_surface"], base.actions["poultry_surface"]
@@ -300,13 +348,15 @@ class AdaptiveLiftTests(unittest.TestCase):
     self.assertNotIn("foot_clearance", cfg.rewards)
     self.assertNotIn("weight_poultry_foot_level", cfg.curriculum)
     self.assertIsInstance(cfg.commands["twist"], lift.PoultryTwistCfg)
+    self.assertIs(cfg.rewards["track_angular_velocity"].func, lift.track_yaw_rate)
     self.assertEqual(cfg.rewards["track_angular_velocity"].params["std"], .5)
     self.assertEqual(cfg.observations["actor"].history_length, 6)
     self.assertEqual(list(cfg.observations["actor"].terms), [*base.observations["actor"].terms, "clearance_commands"])
     self.assertEqual(list(cfg.observations["critic"].terms),
                      [*base.observations["critic"].terms, "clearance_commands", "litter_truth", "pull_state"])
     # Stand-still terms let go during strong pulls; weights and parameters unchanged.
-    for name in ("idle_position_anchor", "idle_feet_still", "idle_base_motion", "stand_feet_square"):
+    for name in ("idle_position_anchor", "idle_feet_still", "idle_base_motion", "stand_feet_square",
+                 "pose", "track_linear_velocity"):
       self.assertIs(cfg.rewards[name].func.base, base.rewards[name].func)
       self.assertEqual((cfg.rewards[name].weight, cfg.rewards[name].params),
                        (base.rewards[name].weight, base.rewards[name].params))
