@@ -46,6 +46,7 @@ _TERM_RULES: dict[str, tuple[list[int], list[float]]] = {
   "foot_air_time": ([1, 0], [1.0, 1.0]),
   "foot_contact": ([1, 0], [1.0, 1.0]),
   "foot_contact_forces": ([3, 4, 5, 0, 1, 2], [1.0, -1.0, 1.0, 1.0, -1.0, 1.0]),
+  "clearance_commands": ([1, 0], [1.0, 1.0]),
   "height_command": ([0], [1.0]),
   "lean_command": ([0], [1.0]),  # forward pitch: unchanged by a left-right mirror
 }

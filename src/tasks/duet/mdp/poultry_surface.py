@@ -64,7 +64,7 @@ def point_kinematics(position, rotation, linear_velocity, angular_velocity, endp
   return points, velocity
 
 
-def litter_wrench(points, velocity, com, layer_height, strength, max_force):
+def litter_wrench(points, velocity, com, layer_height, strength, max_force, floor_height=0.0):
   """Dissipative horizontal resistance; endpoint average avoids mesh-count gain.
 
   strength is effective per-foot N s / m^2, depth and layer height are metres.
@@ -72,7 +72,7 @@ def litter_wrench(points, velocity, com, layer_height, strength, max_force):
   force growth from soft-contact penetration. No vertical support is added:
   ground contact and the existing contact sensors remain authoritative.
   """
-  depth = torch.minimum((layer_height - points[..., 2]).clamp_min(0), layer_height)
+  depth = torch.minimum((floor_height + layer_height - points[..., 2]).clamp_min(0), layer_height)
   force = -strength[:, None, None, None] * depth[..., None] * velocity
   force = force.clone()
   force[..., 2] = 0
